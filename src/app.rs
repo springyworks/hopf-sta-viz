@@ -409,7 +409,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.state = Some(pollster::block_on(State::new(window)));
+            self.state = pollster::block_on(State::new(window));
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -431,8 +431,12 @@ impl ApplicationHandler<UserEvent> for App {
             // through the event loop (we must not block on the web).
             let proxy = self.proxy.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let state = State::new(window).await;
-                let _ = proxy.send_event(UserEvent::StateReady(state));
+                // On success hand `State` back through the loop; on failure the
+                // fallback notice is already shown and we simply stop here —
+                // no panic, no red console errors.
+                if let Some(state) = State::new(window).await {
+                    let _ = proxy.send_event(UserEvent::StateReady(state));
+                }
             });
         }
     }
@@ -516,7 +520,15 @@ impl ApplicationHandler<UserEvent> for App {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
-fn set_boot_status(html: &str) {
+pub(crate) const WEBGPU_UNAVAILABLE_MSG: &str =
+    "⚠️ WebGPU is not available in this view.<br><br>\
+     Open this page in a normal <b>Chrome / Edge 113+</b> tab \
+     (not the editor's embedded preview / Simple Browser), \
+     or view the lightweight \
+     <a href=\"./impression/\" style=\"color:#7fd1ff\">artist's impression</a>.";
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn set_boot_status(html: &str) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
         if let Some(el) = doc.get_element_by_id("boot-status") {
             el.set_inner_html(html);
@@ -524,8 +536,23 @@ fn set_boot_status(html: &str) {
     }
 }
 
+/// Returns `true` only when the page exposes a usable `navigator.gpu`.
+/// Embedded webviews (VS Code Simple Browser, Live Preview, etc.) do not, so
+/// we can bail out gracefully before ever touching wgpu.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn webgpu_available() -> bool {
+    use wasm_bindgen::JsValue;
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(w.navigator().as_ref(), &JsValue::from_str("gpu")).ok())
+        .map(|gpu| !gpu.is_undefined() && !gpu.is_null())
+        .unwrap_or(false)
+}
+
 impl State {
-    async fn new(window: Arc<Window>) -> Self {
+    /// Build the GPU state. Returns `None` (after posting a friendly notice to
+    /// the page) when no WebGPU adapter is available — this happens in embedded
+    /// webviews that expose `navigator.gpu` but cannot back it with a real GPU.
+    async fn new(window: Arc<Window>) -> Option<Self> {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -542,14 +569,13 @@ impl State {
             Some(a) => a,
             None => {
                 #[cfg(target_arch = "wasm32")]
-                set_boot_status(
-                    "⚠️ WebGPU is not available in this view.<br><br>\
-                     Open this page in a normal <b>Chrome / Edge 113+</b> tab \
-                     (not the editor's embedded preview / Simple Browser), \
-                     or view the lightweight \
-                     <a href=\"./impression/\" style=\"color:#7fd1ff\">artist's impression</a>.",
-                );
-                panic!("no suitable GPU adapter — WebGPU unavailable in this browser/view");
+                {
+                    log::warn!("no WebGPU adapter — staying on the fallback notice");
+                    set_boot_status(WEBGPU_UNAVAILABLE_MSG);
+                    return None;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                panic!("no suitable GPU adapter — WebGPU unavailable");
             }
         };
 
@@ -959,7 +985,7 @@ impl State {
             &device, config.format, Some(wgpu::TextureFormat::Depth32Float), 1, false,
         );
 
-        Self {
+        Some(Self {
             window, surface, device, queue, config, depth_view,
             sim,
             seed_count, steps_per_line, particle_count,
@@ -975,7 +1001,7 @@ impl State {
             rmb_down: false, mmb_down: false,
             egui_ctx, egui_winit, egui_renderer,
             last_tick: Instant::now(),
-        }
+        })
     }
 
     fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {

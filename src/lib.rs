@@ -60,5 +60,15 @@ pub fn start() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
     log::info!("hopf-sta-viz: starting WebGPU build");
+
+    // Embedded webviews (VS Code Simple Browser / Live Preview, etc.) do not
+    // expose `navigator.gpu`. Detect that up front and show a friendly message
+    // instead of spinning up wgpu just to panic on the missing adapter.
+    if !app::webgpu_available() {
+        log::warn!("navigator.gpu is unavailable — not starting the GPU solver");
+        app::set_boot_status(app::WEBGPU_UNAVAILABLE_MSG);
+        return;
+    }
+
     run();
 }
