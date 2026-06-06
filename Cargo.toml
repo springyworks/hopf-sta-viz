@@ -39,6 +39,11 @@ rayon = "1.10"
 # js-sys / web-sys versions that winit + wgpu select (avoids the
 # "failed to find intrinsics to enable clone_ref" CLI error from a skewed pair).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Enable wgpu's WebGL2 backend so the browser build can render through a real
+# WebGL2 context (Backends::GL) when WebGPU is unavailable/flaky. Compute
+# shaders aren't supported on WebGL2, so the web build runs the physics on the
+# CPU and uses the GPU only for drawing — see src/web_gl.rs.
+wgpu = { version = "22.1", features = ["webgl"] }
 wasm-bindgen = "=0.2.100"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

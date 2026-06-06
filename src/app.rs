@@ -520,6 +520,7 @@ impl ApplicationHandler<UserEvent> for App {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)] // retained for the optional WebGPU path; web build uses WebGL2
 pub(crate) const WEBGPU_UNAVAILABLE_MSG: &str =
     "⚠️ WebGPU is not available in this view.<br><br>\
      Open this page in a normal <b>Chrome / Edge 113+</b> tab \
@@ -528,6 +529,7 @@ pub(crate) const WEBGPU_UNAVAILABLE_MSG: &str =
      <a href=\"./impression/\" style=\"color:#7fd1ff\">artist's impression</a>.";
 
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)] // retained for the optional WebGPU path; web build uses WebGL2
 pub(crate) fn set_boot_status(html: &str) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
         if let Some(el) = doc.get_element_by_id("boot-status") {
@@ -540,6 +542,7 @@ pub(crate) fn set_boot_status(html: &str) {
 /// Embedded webviews (VS Code Simple Browser, Live Preview, etc.) do not, so
 /// we can bail out gracefully before ever touching wgpu.
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)] // retained for the optional WebGPU path; web build uses WebGL2
 pub(crate) fn webgpu_available() -> bool {
     use wasm_bindgen::JsValue;
     web_sys::window()

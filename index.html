@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>hopf-sta-viz — Rañada EM hopfion · Spacetime Algebra · WebGPU</title>
+  <title>hopf-sta-viz — Rañada EM hopfion · Spacetime Algebra · WebGL2</title>
 
   <!-- Trunk compiles the crate's cdylib (which holds #[wasm_bindgen(start)])
        to WebAssembly and injects the loader. The crate also has a native bin,
@@ -41,24 +41,44 @@
     #boot-msg .small { font-size: 12px; color: #7a8580; }
     #boot-msg a { color: #7fd1ff; text-decoration: none; }
     #boot-msg a:hover { text-decoration: underline; }
+
+    /* Top banner — pure markup. pointer-events:none so it never blocks the
+       canvas orbit/pan or the egui control panel underneath it. */
+    #top-banner {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+      pointer-events: none;
+      display: flex; align-items: center; justify-content: center;
+      padding: 7px 16px; text-align: center;
+      font-size: 13px; line-height: 1.35; letter-spacing: 0.015em;
+      color: #cfe8ff;
+      background: linear-gradient(180deg,
+        rgba(8,10,16,0.94) 0%, rgba(8,10,16,0.72) 66%, rgba(8,10,16,0.0) 100%);
+      text-shadow: 0 1px 3px rgba(0,0,0,0.85);
+    }
+    #top-banner b { color: #00ff88; font-weight: 600; }
   </style>
 </head>
 <body>
   <div id="hopf-canvas-host"></div>
 
+  <div id="top-banner">
+    this is fantasie world — <b>AI&nbsp;Opus generated, developer-guided</b> — needs a lot of tweaks, but there is something going on
+  </div>
+
   <div id="boot-msg">
     <div class="card">
-      <h1>hopf-sta-viz · live WebGPU build</h1>
-      <p id="boot-status">Initializing the GPU FDTD solver…</p>
-      <p>This runs the <b>real Rust + wgpu + WGSL</b> Spacetime-Algebra field
-         simulation (the same code as the native app) compiled to WebAssembly.</p>
+      <h1>hopf-sta-viz · live WebGL2 build</h1>
+      <p id="boot-status">Initializing the WebGL2 renderer…</p>
+      <p>This runs <b>Rust + wgpu</b> compiled to WebAssembly. The GPU draws the
+         hopfion particle field through a <b>WebGL2</b> context while the CPU
+         advects the cloud along the analytic Poynting vector.</p>
       <p class="small">
-        It needs a <b>WebGPU-capable browser</b> — Chrome/Edge 113+ or Safari 18+
-        (Firefox: enable <code>dom.webgpu.enabled</code>). Compute shaders are not
-        available on WebGL, so an older browser will stay on this screen.
+        Needs a <b>WebGL2-capable browser</b> (essentially every current
+        desktop browser). The full compute-shader FDTD solver — which requires
+        <b>WebGPU</b> — runs in the native app and in WebGPU browsers.
       </p>
       <p class="small">
-        No WebGPU? See the lightweight artist's impression instead:
+        See also the lightweight artist's impression:
         <a href="./impression/">/impression/</a>.
       </p>
     </div>

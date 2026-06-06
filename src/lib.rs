@@ -16,6 +16,16 @@ mod camera;
 mod fdtd;
 mod ui;
 
+// Browser WebGL2 variant (CPU physics + GPU rendering through wgpu's GL
+// backend). Compiled only for wasm; the native build never touches it.
+#[cfg(target_arch = "wasm32")]
+mod web_gl;
+
+// Real CPU Yee-grid Maxwell FDTD used by the WebGL2 build (no GPU compute on the
+// web, so the same scheme the native shaders run is done on the CPU here).
+#[cfg(target_arch = "wasm32")]
+mod web_fdtd;
+
 use app::{App, UserEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -54,21 +64,16 @@ pub fn run_native() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Browser entry point. Called automatically when the wasm module is loaded.
+///
+/// We render through **WebGL2** (wgpu's GL backend) rather than WebGPU: many
+/// browsers ship a solid WebGL2 but a disabled/flaky WebGPU, and WebGL2 is all
+/// this visualizer's *rendering* needs. The physics that the native build runs
+/// in compute shaders is instead run on the CPU here — see `web_gl`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
-    log::info!("hopf-sta-viz: starting WebGPU build");
-
-    // Embedded webviews (VS Code Simple Browser / Live Preview, etc.) do not
-    // expose `navigator.gpu`. Detect that up front and show a friendly message
-    // instead of spinning up wgpu just to panic on the missing adapter.
-    if !app::webgpu_available() {
-        log::warn!("navigator.gpu is unavailable — not starting the GPU solver");
-        app::set_boot_status(app::WEBGPU_UNAVAILABLE_MSG);
-        return;
-    }
-
-    run();
+    log::info!("hopf-sta-viz: starting WebGL2 build");
+    web_gl::run_webgl();
 }
