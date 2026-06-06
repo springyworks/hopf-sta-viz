@@ -8,18 +8,7 @@
   <!-- Trunk compiles the crate's cdylib (which holds #[wasm_bindgen(start)])
        to WebAssembly and injects the loader. The crate also has a native bin,
        so we select the library artifact explicitly. -->
-  
-<script type="module">
-import init, * as bindings from './hopf-sta-viz-2f60d7dcd23b9839.js';
-const wasm = await init({ module_or_path: './hopf-sta-viz-2f60d7dcd23b9839_bg.wasm' });
-
-
-window.wasmBindings = bindings;
-
-
-dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
-
-</script>
+  <link data-trunk rel="rust" data-target-name="hopf_sta_viz" data-wasm-opt="2" />
 
   <style>
     :root { color-scheme: dark; }
@@ -53,7 +42,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     #boot-msg a { color: #7fd1ff; text-decoration: none; }
     #boot-msg a:hover { text-decoration: underline; }
   </style>
-<link rel="modulepreload" href="./hopf-sta-viz-2f60d7dcd23b9839.js" crossorigin="anonymous" integrity="sha384-VoWLJJUhemdPJpQyYiMkBduUc2P0IDGU1q6FrD21D5u62S0KOLtXGxcgBPXuwHSq"><link rel="preload" href="./hopf-sta-viz-2f60d7dcd23b9839_bg.wasm" crossorigin="anonymous" integrity="sha384-tlHlc7RkE1fAbm8jbPjWIH2i4Uy8UQ7doTxingE6jy9inPxPNZfOarZ56rcyu20f" as="fetch" type="application/wasm"></head>
+</head>
 <body>
   <div id="hopf-canvas-host"></div>
 

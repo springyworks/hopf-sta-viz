@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -318,7 +318,7 @@ struct Channel {
 // State.
 // ---------------------------------------------------------------------------
 
-struct State {
+pub(crate) struct State {
     window:   Arc<Window>,
     surface:  wgpu::Surface<'static>,
     device:   wgpu::Device,
@@ -380,17 +380,76 @@ struct State {
 // App.
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-pub struct App { state: Option<State> }
+/// Event delivered to the winit loop once the (async) GPU state is ready.
+/// On the web the device/queue must be requested asynchronously, so we build
+/// `State` off the main control flow and hand it back through this event.
+/// (Constructed only on wasm; native fills `App::state` synchronously.)
+#[allow(dead_code)]
+pub(crate) enum UserEvent { StateReady(State) }
 
-impl ApplicationHandler for App {
+pub(crate) struct App {
+    state: Option<State>,
+    #[allow(dead_code)] // read only on the wasm async path
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+}
+
+impl App {
+    pub(crate) fn new(event_loop: &winit::event_loop::EventLoop<UserEvent>) -> Self {
+        Self { state: None, proxy: event_loop.create_proxy() }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.state.is_some() { return; }
         let attrs = Window::default_attributes()
             .with_title("hopf-sta-viz · Rañada EM hopfion · STA · wgpu")
             .with_inner_size(winit::dpi::LogicalSize::new(1400, 900));
         let window = Arc::new(el.create_window(attrs).expect("window"));
-        self.state = Some(pollster::block_on(State::new(window)));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.state = Some(pollster::block_on(State::new(window)));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Mount winit's <canvas> into the page so the surface is visible.
+            use winit::platform::web::WindowExtWebSys;
+            if let Some(canvas) = window.canvas() {
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    let dst = doc
+                        .get_element_by_id("hopf-canvas-host")
+                        .or_else(|| doc.body().map(Into::into));
+                    if let Some(dst) = dst {
+                        canvas.set_id("hopf-canvas");
+                        let _ = dst.append_child(&canvas);
+                    }
+                }
+            }
+            // Request the GPU device asynchronously, then deliver `State` back
+            // through the event loop (we must not block on the web).
+            let proxy = self.proxy.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let state = State::new(window).await;
+                let _ = proxy.send_event(UserEvent::StateReady(state));
+            });
+        }
+    }
+
+    fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::StateReady(state) = event;
+        // WebGPU is live — drop the "initializing / needs WebGPU" overlay.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                if let Some(el) = doc.get_element_by_id("boot-msg") {
+                    let _ = el.set_attribute("hidden", "");
+                }
+            }
+        }
+        state.window.request_redraw();
+        self.state = Some(state);
     }
 
     fn window_event(
@@ -811,11 +870,17 @@ impl State {
         // CPU (real multi-core work) then runs leapfrog Maxwell entirely
         // on the GPU.  Particles advect along the live Poynting vector.
         // ----------------------------------------------------------------
+        // The +x flight axis is 3× the square cross-section. Native uses a fat
+        // grid; the browser (tighter GPU memory limits) uses a lighter one.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (cross_n, fdtd_particles) = (128u32, 600_000u32);  // 384×128×128
+        #[cfg(target_arch = "wasm32")]
+        let (cross_n, fdtd_particles) = (64u32, 220_000u32);   // 192×64×64
         let fdtd = crate::fdtd::FdtdState::new(
             &device, &queue,
-            /* cross_n       */ 128,   // square y/z cross-section; +x is 3× (=384)
+            cross_n,
             /* world_extent  */ 2.5,   // half-side of the narrow cross-section
-            /* particle_count*/ 600_000,
+            fdtd_particles,
         );
 
         let fdtd_render_color = RenderParams {
@@ -1388,14 +1453,22 @@ impl State {
             sr = self.channel_s.color[0], sg = self.channel_s.color[1], sb  = self.channel_s.color[2],
         );
 
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let ts = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let fname = format!("preset-{:?}-{}.json", s.preset, ts);
-        let path  = std::env::current_dir()?.join(&fname);
-        std::fs::write(&path, json)?;
-        Ok(path.to_string_lossy().into_owned())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = std::env::current_dir()?.join(&fname);
+            std::fs::write(&path, json)?;
+            Ok(path.to_string_lossy().into_owned())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            log::info!("preset export (web, not written to disk):\n{json}");
+            Ok(fname)
+        }
     }
 }
 

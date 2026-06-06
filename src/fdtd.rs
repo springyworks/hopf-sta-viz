@@ -22,6 +22,7 @@
 //   * Mirror-mask construction (parallel over Z slices).
 
 use bytemuck::{Pod, Zeroable};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
@@ -378,8 +379,9 @@ impl FdtdState {
         queue.write_buffer(&self.adv_buf, 0, bytemuck::bytes_of(&ap));
     }
 
-    /// Build the donut field and the mirror mask on the CPU using rayon
-    /// (parallel over Z slices), then upload to the GPU.
+    /// Build the donut field and the mirror mask on the CPU, then upload to the
+    /// GPU. Native parallelises the Z slices across all cores via rayon; wasm
+    /// (no threads on wasm32-unknown-unknown) runs the same slices serially.
     pub fn reseed(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let nx = self.nx as usize;
         let ny = self.ny as usize;
@@ -396,62 +398,69 @@ impl FdtdState {
         let cw_y = |i: usize| -> f32 { (i as f32) / (ny as f32 - 1.0) * 2.0 * we  - we  };
         let cw_z = |i: usize| -> f32 { (i as f32) / (nz as f32 - 1.0) * 2.0 * we  - we  };
 
-        // Parallel over Z slices: real multi-core CPU work.
-        let cells: Vec<Cell> = (0..nz).into_par_iter()
-            .flat_map_iter(|zi| {
-                let z = cw_z(zi);
-                let mut row: Vec<Cell> = Vec::with_capacity(nx * ny);
-                for yi in 0..ny {
-                    let y = cw_y(yi);
-                    for xi in 0..nx {
-                        let x = cw_x(xi);
-                        let dx = x - sc[0];
-                        let dy = y - sc[1];
-                        let dz = z - sc[2];
-                        let rho2 = dy*dy + dz*dz;
-                        let rho  = rho2.sqrt().max(1e-6);
-                        let env  = a * (-((rho - r0).powi(2) + dx*dx) / (w*w)).exp();
+        // Per-Z-slice donut builder. Native runs these slices across all CPU
+        // cores via rayon; wasm (no threads) runs them serially.
+        let build_cell_slice = |zi: usize| -> Vec<Cell> {
+            let z = cw_z(zi);
+            let mut row: Vec<Cell> = Vec::with_capacity(nx * ny);
+            for yi in 0..ny {
+                let y = cw_y(yi);
+                for xi in 0..nx {
+                    let x = cw_x(xi);
+                    let dx = x - sc[0];
+                    let dy = y - sc[1];
+                    let dz = z - sc[2];
+                    let rho2 = dy*dy + dz*dz;
+                    let rho  = rho2.sqrt().max(1e-6);
+                    let env  = a * (-((rho - r0).powi(2) + dx*dx) / (w*w)).exp();
 
-                        // E azimuthal around the +x axis
-                        let ey = -dz / rho * env;
-                        let ez =  dy / rho * env;
+                    // E azimuthal around the +x axis
+                    let ey = -dz / rho * env;
+                    let ez =  dy / rho * env;
 
-                        // B poloidal: B = x̂ × E ⇒ E × B points in +x  → propagates +x
-                        let by = -dy / rho * env;
-                        let bz = -dz / rho * env;
+                    // B poloidal: B = x̂ × E ⇒ E × B points in +x → propagates +x
+                    let by = -dy / rho * env;
+                    let bz = -dz / rho * env;
 
-                        row.push(Cell {
-                            e: [0.0, ey, ez, 0.0],
-                            b: [0.0, by, bz, 0.0],
-                        });
-                    }
+                    row.push(Cell {
+                        e: [0.0, ey, ez, 0.0],
+                        b: [0.0, by, bz, 0.0],
+                    });
                 }
-                row.into_iter()
-            })
-            .collect();
+            }
+            row
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let cells: Vec<Cell> =
+            (0..nz).into_par_iter().flat_map_iter(build_cell_slice).collect();
+        #[cfg(target_arch = "wasm32")]
+        let cells: Vec<Cell> = (0..nz).flat_map(build_cell_slice).collect();
         queue.write_buffer(&self.grid_buf, 0, bytemuck::cast_slice(&cells));
 
         // Parallel mirror mask.
         let mm0 = self.mirror_min_world;
         let mm1 = self.mirror_max_world;
-        let mask: Vec<u32> = (0..nz).into_par_iter()
-            .flat_map_iter(|zi| {
-                let z = cw_z(zi);
-                let mut row = Vec::with_capacity(nx * ny);
-                for yi in 0..ny {
-                    let y = cw_y(yi);
-                    for xi in 0..nx {
-                        let x = cw_x(xi);
-                        let inside =
-                            x >= mm0[0] && x <= mm1[0] &&
-                            y >= mm0[1] && y <= mm1[1] &&
-                            z >= mm0[2] && z <= mm1[2];
-                        row.push(inside as u32);
-                    }
+        let build_mask_slice = |zi: usize| -> Vec<u32> {
+            let z = cw_z(zi);
+            let mut row = Vec::with_capacity(nx * ny);
+            for yi in 0..ny {
+                let y = cw_y(yi);
+                for xi in 0..nx {
+                    let x = cw_x(xi);
+                    let inside =
+                        x >= mm0[0] && x <= mm1[0] &&
+                        y >= mm0[1] && y <= mm1[1] &&
+                        z >= mm0[2] && z <= mm1[2];
+                    row.push(inside as u32);
                 }
-                row.into_iter()
-            })
-            .collect();
+            }
+            row
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let mask: Vec<u32> =
+            (0..nz).into_par_iter().flat_map_iter(build_mask_slice).collect();
+        #[cfg(target_arch = "wasm32")]
+        let mask: Vec<u32> = (0..nz).flat_map(build_mask_slice).collect();
         queue.write_buffer(&self.mask_buf, 0, bytemuck::cast_slice(&mask));
 
         // Reset particle ages so they all respawn on the next advect pass.

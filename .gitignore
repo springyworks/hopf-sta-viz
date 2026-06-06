@@ -1,6 +1,9 @@
 # Rust / Cargo build output
 /target/
 
+# Trunk wasm staging output (the publishable copy lives in docs/)
+/dist/
+
 # Runtime artifacts written by the app into the working directory
 # (timestamped preset dumps, and the in-app F1 remark log)
 /preset-*.json

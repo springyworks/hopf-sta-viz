@@ -31,8 +31,8 @@ fn reg(
 }
 
 fn unix_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
 }
@@ -85,9 +85,17 @@ fn write_remarks(s: &SimSettings) -> std::io::Result<String> {
         count = s.help.remarks.len(),
         items = items,
     );
-    let path = std::env::current_dir()?.join("ui-remarks.json");
-    std::fs::write(&path, json)?;
-    Ok(path.to_string_lossy().into_owned())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = std::env::current_dir()?.join("ui-remarks.json");
+        std::fs::write(&path, json)?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        log::info!("ui-remarks (web, not written to disk):\n{json}");
+        Ok("(web: logged to console)".to_string())
+    }
 }
 
 pub fn draw_ui(ctx: &egui::Context, s: &mut SimSettings) {
@@ -292,7 +300,7 @@ pub fn draw_ui(ctx: &egui::Context, s: &mut SimSettings) {
                     format!("{:?}", s.render_mode), r);
                 let r = ui.radio_value(&mut s.render_mode, RenderMode::Fdtd, "FDTD (live Maxwell)");
                 reg(ui, &mut s.help, "render.mode.fdtd",
-                    "Run a real Yee-leapfrog Maxwell solver on a 192³ GPU grid and advect particles in the live field.",
+                    "Run a real Yee-leapfrog Maxwell solver on a 384×128×128 GPU grid (3× longer along the +x flight axis) and advect particles in the live field.",
                     format!("{:?}", s.render_mode), r);
             });
 
@@ -345,7 +353,7 @@ pub fn draw_ui(ctx: &egui::Context, s: &mut SimSettings) {
                 }
                 RenderMode::Fdtd => {
                     ui.label(egui::RichText::new(
-                        "REAL FDTD: Yee leapfrog Maxwell on a 192³ GPU grid."
+                        "REAL FDTD: Yee leapfrog Maxwell on a 384×128×128 GPU grid."
                     ).strong().color(egui::Color32::from_rgb(120, 220, 140)));
                     ui.label("F = E + I·c·B  ·  dt = 0.45·dx  ·  CFL safe at √3");
 
@@ -521,7 +529,7 @@ pub fn draw_ui(ctx: &egui::Context, s: &mut SimSettings) {
                     });
 
                     ui.label(egui::RichText::new(
-                        "Tip: substeps≥8 + grid 192³ is what warms the RTX 2070. \
+                        "Tip: substeps≥8 + grid 384×128×128 is what warms the RTX 2070. \
                          Watch the donut propagate +x, hit the pink box, and bounce."
                     ).small().italics());
                 }

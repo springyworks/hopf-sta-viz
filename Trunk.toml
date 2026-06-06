@@ -1,0 +1,17 @@
+# Trunk build config for the WebAssembly / WebGPU build of hopf-sta-viz.
+# Native builds are unaffected (cargo build --release).
+#
+# We build into ./dist (Trunk wipes its dist dir on every build) and then a
+# helper copies the artifacts into ./docs so GitHub Pages can serve them
+# alongside the artist's-impression demo at ./docs/impression/.
+
+[build]
+target = "index.html"
+dist = "dist"
+# Relative asset URLs so it works under the project-pages sub-path
+# (https://springyworks.github.io/hopf-sta-viz/).
+public_url = "./"
+
+[serve]
+address = "127.0.0.1"
+port = 8080

@@ -1,0 +1,9 @@
+# Target-scoped flags. Native builds are unaffected.
+#
+# wasm-bindgen 0.2.100 expects the `reference-types` proposal to be enabled so
+# it can find the externref `clone_ref` intrinsic. Current nightly does not turn
+# it on by default for wasm32-unknown-unknown, which produces:
+#   error: failed to find intrinsics to enable `clone_ref` function
+# Enabling it here fixes the trunk / wasm-bindgen step.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=-reference-types,-multivalue"]

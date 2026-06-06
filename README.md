@@ -36,7 +36,8 @@ panel and the pipeline dispatches.
 
 ### Live electromagnetism on the GPU
 - **FDTD Maxwell solver** — a Yee leapfrog finite-difference time-domain
-  integrator on a **192³ collocated grid**, advancing $\mathbf{E}$ and
+  integrator on an **anisotropic 384×128×128 grid** (3× longer along the +x
+  flight axis, so pulses visibly travel), advancing $\mathbf{E}$ and
   $\mathbf{B}$ every frame entirely in compute shaders.
 - **Knotted-light seeding** — the grid is seeded with a Rañada/Bateman hopfion
   donut that then propagates and evolves under the discrete Maxwell equations.
@@ -74,10 +75,11 @@ map, evolved by rotating $F$ inside the $(\mathbf{E},\mathbf{B})$ plane
 
 | Layer | What it is | Honesty |
 |-------|------------|---------|
-| **FDTD mode** | Yee leapfrog solver for Maxwell's equations on a 192³ grid, with PEC boundary, seeding, advection. | **Real** discretized physics. Numerical, but it actually integrates Maxwell. |
+| **FDTD mode** | Yee leapfrog solver for Maxwell's equations on a 384×128×128 grid, with PEC boundary, seeding, advection. | **Real** discretized physics. Numerical, but it actually integrates Maxwell. |
 | **Analytic presets** | Closed-form Hopf-map fields with time modeled as a rotation in the $(\mathbf{E},\mathbf{B})$ plane. | **Artist's / analytic impression.** Correct topology, *approximate* dynamics — not a full solution of the evolution PDE. |
-| **`docs/index.html` web demo** | Three.js torus-knot meshes that *suggest* linked E/M field tubes. | **Pure artist's impression.** Decorative geometry, no field solver at all. |
-| **`docs/notes/gemini-exploration.md`** | The original brainstorming transcript (theory + throwaway HTML prototypes). | Exploratory notes / "the fakes," kept for provenance — clearly labeled. |
+| **`docs/index.html` web demo** | The **same Rust + wgpu + WGSL FDTD app** compiled to WebAssembly, running the solver live on **WebGPU** (192×64×64 grid for browser GPU limits). | **Real** physics in the browser. Requires a WebGPU-capable browser. |
+| **`docs/impression/` web demo** | Three.js torus-knot meshes that *suggest* linked E/M field tubes. | **Pure artist's impression.** Decorative geometry, no field solver — the WebGPU fallback. |
+| **`docs/impression/notes/gemini-exploration.md`** | The original brainstorming transcript (theory + throwaway HTML prototypes). | Exploratory notes / "the fakes," kept for provenance — clearly labeled. |
 
 The repository never pretends the impressions are the physics. The FDTD path is
 the scientific core; everything else is there to make a 4D idea graspable to the
@@ -98,33 +100,54 @@ updates per frame.
 
 ### Project layout
 ```
-src/main.rs        entry point
+src/main.rs        thin native launcher (calls into the library crate)
+src/lib.rs         crate root: module decls + native/wasm entry points
 src/app.rs         winit ApplicationHandler, wgpu surface, SimSettings, frame loop
 src/camera.rs      orbit camera + view/proj uniform (+ fit())
-src/fdtd.rs        192³ Yee FDTD solver, seeding, PEC mirror, particle advection
+src/fdtd.rs        anisotropic 384×128×128 Yee FDTD solver, seeding, PEC mirror, particle advection
 src/ui.rs          egui transport bar, sliders, presets, F1 remark log
 shaders/           WGSL: fdtd_update_e/b, fdtd_particles, hopfion eval, render passes
-web/src/main.ts    TypeScript source for the GitHub Pages artist's-impression demo
-docs/              published GitHub Pages site (index.html + generated main.js)
-docs/notes/        DESIGN.md (architecture note) + gemini-exploration.md (the "fakes")
+index.html         trunk shell for the WASM/WebGPU build (markup only)
+Trunk.toml         trunk build config (wasm → dist/, copied into docs/)
+web/src/main.ts    TypeScript source for the artist's-impression demo (docs/impression/)
+docs/              published GitHub Pages site: WASM app at /, impression at /impression/
+docs/impression/   Three.js fallback: index.html + generated main.js + notes/ (DESIGN.md, gemini-exploration.md)
 ```
 
-The web demo is authored in TypeScript under `web/src/` and compiled to the
-generated `docs/main.js` with `tsc -p web/tsconfig.json` — never hand-edit the
-generated `.js`.
+The artist's-impression fallback is authored in TypeScript under `web/src/` and
+compiled to the generated `docs/impression/main.js` with
+`tsc -p web/tsconfig.json` — never hand-edit the generated `.js`. The primary
+web demo (the real solver) is the Rust crate compiled with `trunk`.
 
 ---
 
-## Online demo (artist's impression)
+## Build & run (web / WebGPU)
 
-A native wgpu app cannot run on GitHub Pages, so the published demo at
+The **same Rust solver** compiles to WebAssembly and runs the FDTD compute
+shaders live on **WebGPU** — no Vulkan, no native install. Build with
+[trunk](https://trunkrs.dev):
+
+```bash
+trunk build --release      # outputs to dist/
+cp dist/index.html dist/hopf_sta_viz-*.js dist/hopf_sta_viz-*_bg.wasm docs/
+```
+
+(`trunk serve --release` serves it locally at <http://127.0.0.1:8080> for
+testing.) The published copy lives in `docs/` for GitHub Pages.
+
+## Online demo
+
+The published demo at
 
 **→ https://springyworks.github.io/hopf-sta-viz/**
 
-is a self-contained **Three.js artist's impression** of the linked
-electric/magnetic field tubes of a Rañada hopfion. It is intentionally
-*illustrative*, not a Maxwell solver — see the banner on the page itself. For
-the real FDTD physics, build and run the native Rust app above.
+is the **real Rust + wgpu + WGSL FDTD app** compiled to WebAssembly, running the
+Maxwell solver live on your GPU via **WebGPU** (a 192×64×64 grid, sized for
+browser GPU memory limits). It needs a WebGPU-capable browser — Chrome/Edge 113+
+or Safari 18+ (Firefox: enable `dom.webgpu.enabled`). On a browser without
+WebGPU the page links to a lightweight **Three.js artist's impression** at
+[`/impression/`](https://springyworks.github.io/hopf-sta-viz/impression/),
+which is *illustrative only*, not a Maxwell solver.
 
 ---
 
