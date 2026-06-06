@@ -813,9 +813,9 @@ impl State {
         // ----------------------------------------------------------------
         let fdtd = crate::fdtd::FdtdState::new(
             &device, &queue,
-            /* grid_n        */ 192,
-            /* world_extent  */ 2.5,
-            /* particle_count*/ 400_000,
+            /* cross_n       */ 128,   // square y/z cross-section; +x is 3× (=384)
+            /* world_extent  */ 2.5,   // half-side of the narrow cross-section
+            /* particle_count*/ 600_000,
         );
 
         let fdtd_render_color = RenderParams {
@@ -1083,8 +1083,8 @@ impl State {
         if self.sim.render_mode == RenderMode::Fdtd {
             // Position the mirror wall from the gap slider (live wireframe move;
             // the reflecting mask refreshes on the next reseed/pulse).
-            let we = self.fdtd.world_extent;
-            self.fdtd.set_mirror_gap(&self.device, self.sim.fdtd_mirror_gap.clamp(0.0, 1.4) * we);
+            let wex = self.fdtd.world_ext_x;
+            self.fdtd.set_mirror_gap(&self.device, self.sim.fdtd_mirror_gap.clamp(0.0, 1.4) * wex);
 
             if self.sim.fdtd_reseed_requested {
                 self.sim.fdtd_reseed_requested = false;
@@ -1095,8 +1095,8 @@ impl State {
                 self.fdtd.seed_width_world  = self.sim.fdtd_seed_width_frac.clamp(0.02, 0.4)  * we;
                 self.fdtd.seed_amp          = self.sim.fdtd_seed_amp.max(0.0);
                 self.fdtd.reseed(&self.device, &self.queue);
-                log::info!("FDTD reseeded: grid={}, mirror={}, R={:.2}, W={:.2}, A={:.2}",
-                    self.fdtd.grid_n, self.fdtd.mirror_enabled,
+                log::info!("FDTD reseeded: grid={}x{}x{}, mirror={}, R={:.2}, W={:.2}, A={:.2}",
+                    self.fdtd.nx, self.fdtd.ny, self.fdtd.nz, self.fdtd.mirror_enabled,
                     self.fdtd.seed_radius_world, self.fdtd.seed_width_world, self.fdtd.seed_amp);
             }
             self.fdtd.mirror_enabled = self.sim.fdtd_mirror_enabled;

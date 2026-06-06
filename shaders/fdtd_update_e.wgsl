@@ -4,8 +4,7 @@
 
 @compute @workgroup_size(8, 8, 4)
 fn update_e(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let n = fp.grid_n;
-    if (gid.x >= n || gid.y >= n || gid.z >= n) { return; }
+    if (gid.x >= fp.nx || gid.y >= fp.ny || gid.z >= fp.nz) { return; }
 
     let xi = i32(gid.x);
     let yi = i32(gid.y);

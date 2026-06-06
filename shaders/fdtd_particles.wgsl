@@ -24,16 +24,19 @@ struct AdvectParams {
 @group(0) @binding(4) var<uniform> adv: AdvectParams;
 
 fn world_to_grid(w: vec3<f32>) -> vec3<f32> {
-    let nf = f32(fp.grid_n - 1u);
-    let we = fp.world_extent;
-    return (w + vec3<f32>(we)) / (2.0 * we) * nf;
+    let we  = fp.world_extent;
+    let wex = fp.world_ext_x;
+    let gx = (w.x + wex) / (2.0 * wex) * f32(fp.nx - 1u);
+    let gy = (w.y + we ) / (2.0 * we ) * f32(fp.ny - 1u);
+    let gz = (w.z + we ) / (2.0 * we ) * f32(fp.nz - 1u);
+    return vec3<f32>(gx, gy, gz);
 }
 
 struct EBPair { e: vec3<f32>, b: vec3<f32> };
 
 fn sample_eb_world(pw: vec3<f32>) -> EBPair {
-    let nf = f32(fp.grid_n);
-    let pc = clamp(world_to_grid(pw), vec3<f32>(1.0), vec3<f32>(nf - 2.0));
+    let hi = vec3<f32>(f32(fp.nx) - 2.0, f32(fp.ny) - 2.0, f32(fp.nz) - 2.0);
+    let pc = clamp(world_to_grid(pw), vec3<f32>(1.0), hi);
     let x0 = i32(floor(pc.x));
     let y0 = i32(floor(pc.y));
     let z0 = i32(floor(pc.z));
@@ -91,8 +94,11 @@ fn advect(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Respawn dead / out-of-bounds particles inside the user-provided seed box.
-    let we = fp.world_extent;
-    let oob = any(p.pos < vec3<f32>(-we)) || any(p.pos > vec3<f32>(we));
+    let we  = fp.world_extent;
+    let wex = fp.world_ext_x;
+    let lo_w = vec3<f32>(-wex, -we, -we);
+    let hi_w = vec3<f32>( wex,  we,  we);
+    let oob = any(p.pos < lo_w) || any(p.pos > hi_w);
     if (p.age > adv.max_age || oob) {
         let h1 = hash(i * 3u + fp.time_step);
         let h2 = hash(i * 3u + 1u + fp.time_step);

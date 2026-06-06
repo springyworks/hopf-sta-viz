@@ -23,13 +23,13 @@ impl OrbitCamera {
     pub fn new(aspect: f32) -> Self {
         Self {
             target: Vec3::ZERO,
-            yaw:   0.6,
-            pitch: 0.45,
-            dist:  6.0,
+            yaw:   0.85,
+            pitch: 0.38,
+            dist:  15.0,
             fov_y: 50.0_f32.to_radians(),
             aspect,
             znear: 0.05,
-            zfar:  100.0,
+            zfar:  140.0,
         }
     }
 
@@ -59,15 +59,16 @@ impl OrbitCamera {
     }
 
     pub fn zoom(&mut self, factor: f32) {
-        self.dist = (self.dist * factor).clamp(0.5, 60.0);
+        self.dist = (self.dist * factor).clamp(0.5, 120.0);
     }
 
-    /// Reframe the scene to a sensible default 3/4 view centred on the origin.
+    /// Reframe the scene to a sensible default 3/4 view that takes in the whole
+    /// long flight box (the +x axis is 3× the cross-section).
     pub fn fit(&mut self) {
         self.target = Vec3::ZERO;
-        self.yaw    = 0.6;
-        self.pitch  = 0.45;
-        self.dist   = 6.0;
+        self.yaw    = 0.85;
+        self.pitch  = 0.38;
+        self.dist   = 15.0;
     }
 
     pub fn pan(&mut self, dx: f32, dy: f32) {

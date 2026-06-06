@@ -25,20 +25,30 @@ use bytemuck::{Pod, Zeroable};
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
+/// The flight axis (+x) gets this many times more cells than the square
+/// cross-section, so a launched pulse has room to actually fly down the box
+/// before it meets the mirror.
+const LEN_MULT_X: u32 = 3;
+
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
 pub struct FdtdParams {
-    pub grid_n:        u32,
+    pub nx:            u32,
+    pub ny:            u32,
+    pub nz:            u32,
     pub pml_layers:    u32,
-    pub enable_mirror: u32,
-    pub time_step:     u32,
 
     pub dt:            f32,
     pub dx:            f32,
     pub sigma:         f32,
     pub pml_strength:  f32,
+
+    pub enable_mirror: u32,
+    pub time_step:     u32,
+    pub _pad_h0:       u32,
+    pub _pad_h1:       u32,
 
     pub mirror_min:    [f32; 4],
     pub mirror_max:    [f32; 4],
@@ -49,6 +59,11 @@ pub struct FdtdParams {
     pub seed_amp:      f32,
     pub seed_kick:     f32,
     pub world_extent:  f32,
+
+    pub world_ext_x:   f32,
+    pub _pad_w0:       f32,
+    pub _pad_w1:       f32,
+    pub _pad_w2:       f32,
 }
 
 #[repr(C)]
@@ -83,8 +98,11 @@ pub struct FdtdParticle {
 // ---------------------------------------------------------------------------
 
 pub struct FdtdState {
-    pub grid_n:             u32,
+    pub nx:                 u32,
+    pub ny:                 u32,
+    pub nz:                 u32,
     pub world_extent:       f32,
+    pub world_ext_x:        f32,
     pub time_step:          u32,
     pub mirror_enabled:     bool,
     pub mirror_min_world:   [f32; 3],
@@ -125,12 +143,18 @@ impl FdtdState {
     pub fn new(
         device:        &wgpu::Device,
         queue:         &wgpu::Queue,
-        grid_n:        u32,
+        cross_n:       u32,
         world_extent:  f32,
         particle_count: u32,
     ) -> Self {
-        assert!(grid_n >= 32 && grid_n <= 320);
-        let cells = (grid_n as u64).pow(3);
+        assert!(cross_n >= 24 && cross_n <= 200);
+        // Anisotropic grid: 3× as many cells along +x (the flight axis) so a
+        // launched pulse has real room to fly before it reaches the mirror.
+        let nx = cross_n * LEN_MULT_X;
+        let ny = cross_n;
+        let nz = cross_n;
+        let world_ext_x = world_extent * LEN_MULT_X as f32;
+        let cells = (nx as u64) * (ny as u64) * (nz as u64);
 
         // ---- buffers ---------------------------------------------------------
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -249,14 +273,15 @@ impl FdtdState {
             build_mirror_wire(device, [0.0_f32; 3], [0.0_f32; 3]);
 
         let mut s = Self {
-            grid_n,
+            nx, ny, nz,
             world_extent,
+            world_ext_x,
             time_step: 0,
             mirror_enabled: true,
-            mirror_min_world: [ world_extent * 0.55, -world_extent * 0.55, -world_extent * 0.55],
-            mirror_max_world: [ world_extent * 0.60,  world_extent * 0.55,  world_extent * 0.55],
-            mirror_gap:        world_extent * 0.40,
-            seed_center_world: [-world_extent * 0.55, 0.0, 0.0],
+            mirror_min_world: [ world_ext_x * 0.78, -world_extent * 0.85, -world_extent * 0.85],
+            mirror_max_world: [ world_ext_x * 0.83,  world_extent * 0.85,  world_extent * 0.85],
+            mirror_gap:        world_ext_x * 0.20,
+            seed_center_world: [-world_ext_x * 0.62, 0.0, 0.0],
             seed_axis:         [1.0, 0.0, 0.0],
             seed_radius_world: world_extent * 0.18,
             seed_width_world:  world_extent * 0.10,
@@ -284,11 +309,12 @@ impl FdtdState {
     ) {
         let dx = 1.0;
         let p = FdtdParams {
-            grid_n:        self.grid_n,
+            nx: self.nx, ny: self.ny, nz: self.nz,
             pml_layers,
+            dt, dx, sigma, pml_strength,
             enable_mirror: self.mirror_enabled as u32,
             time_step:     self.time_step,
-            dt, dx, sigma, pml_strength,
+            _pad_h0: 0, _pad_h1: 0,
             mirror_min: pad4(self.mirror_min_world),
             mirror_max: pad4(self.mirror_max_world),
             seed_center: [
@@ -299,6 +325,8 @@ impl FdtdState {
             seed_amp:   self.seed_amp,
             seed_kick:  0.0,
             world_extent: self.world_extent,
+            world_ext_x: self.world_ext_x,
+            _pad_w0: 0.0, _pad_w1: 0.0, _pad_w2: 0.0,
         };
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&p));
     }
@@ -314,26 +342,32 @@ impl FdtdState {
         respawn_scale:   f32,
         respawn_offset_x: f32,
     ) {
-        let we = self.world_extent;
+        let we  = self.world_extent;
+        let wex = self.world_ext_x;
         let cx = self.seed_center_world[0] + respawn_offset_x;
         // Respawn box: thin slab at the donut starting position so particles
         // continuously seed where the energy actually is.  `respawn_scale`
         // grows/shrinks the slab live without touching the GPU buffers.
         let half_x = self.seed_width_world  * respawn_scale.max(0.01);
         let half_t = self.seed_radius_world * 1.4 * respawn_scale.max(0.01);
-        let lo = [
+        let mut lo = [
             cx - half_x,
             self.seed_center_world[1] - half_t,
             self.seed_center_world[2] - half_t,
         ];
-        let hi = [
+        let mut hi = [
             cx + half_x,
             self.seed_center_world[1] + half_t,
             self.seed_center_world[2] + half_t,
         ];
-        // clamp inside the world box
-        let lo = clamp3(lo, -we * 0.95, we * 0.95);
-        let hi = clamp3(hi, -we * 0.95, we * 0.95);
+        // clamp inside the (anisotropic) world box: x over the long flight axis,
+        // y/z over the narrow square cross-section.
+        lo[0] = lo[0].clamp(-wex * 0.95, wex * 0.95);
+        hi[0] = hi[0].clamp(-wex * 0.95, wex * 0.95);
+        lo[1] = lo[1].clamp(-we * 0.95, we * 0.95);
+        hi[1] = hi[1].clamp(-we * 0.95, we * 0.95);
+        lo[2] = lo[2].clamp(-we * 0.95, we * 0.95);
+        hi[2] = hi[2].clamp(-we * 0.95, we * 0.95);
         let ap = AdvectParams {
             step, drift_scale, n_substeps, max_age,
             seed_lo: pad4(lo),
@@ -347,26 +381,30 @@ impl FdtdState {
     /// Build the donut field and the mirror mask on the CPU using rayon
     /// (parallel over Z slices), then upload to the GPU.
     pub fn reseed(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        let n = self.grid_n as usize;
-        let we = self.world_extent;
+        let nx = self.nx as usize;
+        let ny = self.ny as usize;
+        let nz = self.nz as usize;
+        let we  = self.world_extent;
+        let wex = self.world_ext_x;
         let sc = self.seed_center_world;
         let r0 = self.seed_radius_world;
         let w  = self.seed_width_world.max(1e-3);
         let a  = self.seed_amp;
 
-        let cell_to_world = |i: usize| -> f32 {
-            (i as f32) / (n as f32 - 1.0) * 2.0 * we - we
-        };
+        // Anisotropic cell→world mapping: x is stretched over the long flight axis.
+        let cw_x = |i: usize| -> f32 { (i as f32) / (nx as f32 - 1.0) * 2.0 * wex - wex };
+        let cw_y = |i: usize| -> f32 { (i as f32) / (ny as f32 - 1.0) * 2.0 * we  - we  };
+        let cw_z = |i: usize| -> f32 { (i as f32) / (nz as f32 - 1.0) * 2.0 * we  - we  };
 
         // Parallel over Z slices: real multi-core CPU work.
-        let cells: Vec<Cell> = (0..n).into_par_iter()
+        let cells: Vec<Cell> = (0..nz).into_par_iter()
             .flat_map_iter(|zi| {
-                let z = cell_to_world(zi);
-                let mut row: Vec<Cell> = Vec::with_capacity(n * n);
-                for yi in 0..n {
-                    let y = cell_to_world(yi);
-                    for xi in 0..n {
-                        let x = cell_to_world(xi);
+                let z = cw_z(zi);
+                let mut row: Vec<Cell> = Vec::with_capacity(nx * ny);
+                for yi in 0..ny {
+                    let y = cw_y(yi);
+                    for xi in 0..nx {
+                        let x = cw_x(xi);
                         let dx = x - sc[0];
                         let dy = y - sc[1];
                         let dz = z - sc[2];
@@ -396,14 +434,14 @@ impl FdtdState {
         // Parallel mirror mask.
         let mm0 = self.mirror_min_world;
         let mm1 = self.mirror_max_world;
-        let mask: Vec<u32> = (0..n).into_par_iter()
+        let mask: Vec<u32> = (0..nz).into_par_iter()
             .flat_map_iter(|zi| {
-                let z = cell_to_world(zi);
-                let mut row = Vec::with_capacity(n * n);
-                for yi in 0..n {
-                    let y = cell_to_world(yi);
-                    for xi in 0..n {
-                        let x = cell_to_world(xi);
+                let z = cw_z(zi);
+                let mut row = Vec::with_capacity(nx * ny);
+                for yi in 0..ny {
+                    let y = cw_y(yi);
+                    for xi in 0..nx {
+                        let x = cw_x(xi);
                         let inside =
                             x >= mm0[0] && x <= mm1[0] &&
                             y >= mm0[1] && y <= mm1[1] &&
@@ -418,7 +456,7 @@ impl FdtdState {
 
         // Reset particle ages so they all respawn on the next advect pass.
         let parts: Vec<FdtdParticle> = (0..self.particle_count)
-            .map(|_| FdtdParticle { pos: [we * 2.0, 0.0, 0.0], age: 1e9 })
+            .map(|_| FdtdParticle { pos: [wex * 2.0, 0.0, 0.0], age: 1e9 })
             .collect();
         queue.write_buffer(&self.parts_buf, 0, bytemuck::cast_slice(&parts));
 
@@ -438,10 +476,11 @@ impl FdtdState {
     /// mask only changes on the next reseed; the wireframe moves immediately.
     pub fn set_mirror_gap(&mut self, device: &wgpu::Device, gap: f32) {
         if (gap - self.mirror_gap).abs() < 1e-5 { return; }
-        let we = self.world_extent;
-        let thick = we * 0.05;                       // slab thickness (a few cells)
-        // Keep the wall in front of the seed (which sits at x = -0.55·we).
-        let outer = (we - gap).clamp(-0.35 * we + thick, we);
+        let we  = self.world_extent;
+        let wex = self.world_ext_x;
+        let thick = we * 0.10;                       // slab thickness (a few cells)
+        // Keep the wall in front of the seed (which sits near x = -0.62·world_ext_x).
+        let outer = (wex - gap).clamp(-0.45 * wex + thick, wex);
         let inner = outer - thick;
         let ext = we * 0.85;                         // full-height wall in y/z
         self.mirror_min_world = [inner, -ext, -ext];
@@ -464,10 +503,9 @@ impl FdtdState {
 
     /// Dispatch `substeps` of Yee leapfrog (each = update_e + update_b).
     pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, substeps: u32) {
-        let n  = self.grid_n;
-        let wx = (n + 7) / 8;
-        let wy = (n + 7) / 8;
-        let wz = (n + 3) / 4;
+        let wx = (self.nx + 7) / 8;
+        let wy = (self.ny + 7) / 8;
+        let wz = (self.nz + 3) / 4;
         for _ in 0..substeps {
             {
                 let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -545,6 +583,7 @@ fn bgl_storage_ro(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 fn pad4(v: [f32; 3]) -> [f32; 4] { [v[0], v[1], v[2], 0.0] }
+#[allow(dead_code)]
 fn clamp3(v: [f32; 3], lo: f32, hi: f32) -> [f32; 3] {
     [v[0].clamp(lo, hi), v[1].clamp(lo, hi), v[2].clamp(lo, hi)]
 }
