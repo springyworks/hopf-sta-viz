@@ -515,6 +515,15 @@ impl ApplicationHandler<UserEvent> for App {
 // State construction.
 // ---------------------------------------------------------------------------
 
+#[cfg(target_arch = "wasm32")]
+fn set_boot_status(html: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("boot-status") {
+            el.set_inner_html(html);
+        }
+    }
+}
+
 impl State {
     async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
@@ -525,11 +534,24 @@ impl State {
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
 
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = match instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
-        }).await.expect("no suitable GPU adapter");
+        }).await {
+            Some(a) => a,
+            None => {
+                #[cfg(target_arch = "wasm32")]
+                set_boot_status(
+                    "⚠️ WebGPU is not available in this view.<br><br>\
+                     Open this page in a normal <b>Chrome / Edge 113+</b> tab \
+                     (not the editor's embedded preview / Simple Browser), \
+                     or view the lightweight \
+                     <a href=\"./impression/\" style=\"color:#7fd1ff\">artist's impression</a>.",
+                );
+                panic!("no suitable GPU adapter — WebGPU unavailable in this browser/view");
+            }
+        };
 
         log::info!(
             "GPU adapter: {} ({:?}, backend {:?})",
