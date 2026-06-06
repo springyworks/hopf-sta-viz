@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>hopf-sta-viz — artist's impression of a 4D world (Minkowski spacetime / STA)</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 0;
+      background-color: #0a0a0c; color: #e0e0e6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden; display: flex; flex-direction: column; height: 100vh;
+    }
+    #banner {
+      background: linear-gradient(90deg, #11131a, #0c1a14);
+      border-bottom: 1px solid #1d3a2c;
+      padding: 8px 18px; font-size: 12.5px; line-height: 1.45; color: #b9c4bf;
+    }
+    #banner b { color: #00ff88; }
+    #banner a { color: #7fd1ff; text-decoration: none; }
+    #banner a:hover { text-decoration: underline; }
+    #control-panel {
+      background: rgba(16, 16, 20, 0.95); border-bottom: 1px solid #2a2a35;
+      padding: 12px 20px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; z-index: 10;
+    }
+    .control-group { display: flex; align-items: center; gap: 8px; }
+    label { font-size: 13px; font-weight: 500; color: #a0a0b0; }
+    select, input[type="range"] {
+      background: #1f1f26; border: 1px solid #3a3a4a; color: #fff;
+      padding: 6px 10px; border-radius: 4px; outline: none;
+    }
+    select:focus, input[type="range"]:focus { border-color: #00ff88; }
+    #demo-btn {
+      background: #132b20; border: 1px solid #00ff88; color: #00ff88;
+      padding: 6px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: all 0.2s ease;
+    }
+    #demo-btn.active { background: #00ff88; color: #0a0a0c; box-shadow: 0 0 12px rgba(0, 255, 136, 0.4); }
+    #canvas-container { flex: 1; position: relative; width: 100%; }
+    canvas { width: 100%; height: 100%; display: block; }
+    #hud-overlay {
+      position: absolute; top: 20px; left: 20px;
+      font-family: 'Courier New', Courier, monospace; font-size: 12px; color: #00ff88;
+      background: rgba(10, 10, 12, 0.75); padding: 15px; border-left: 3px solid #00ff88;
+      border-radius: 0 4px 4px 0; pointer-events: none; line-height: 1.5; white-space: pre-wrap;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+  <div id="banner">
+    <b>Artist's impression of dynamics-views from a 4-dimensional world.</b>
+    The 4D world is <b>Minkowski spacetime</b> (ℝ<sup>1,3</sup>), described by
+    <b>Spacetime Algebra</b> — the Clifford algebra Cℓ<sub>1,3</sub> of special relativity, in which
+    the electromagnetic field is the single Faraday bivector F = E + I·B. The linked tubes below
+    suggest a <b>Rañada–Hopf electromagnetic knot</b> (a hopfion).
+    This page is decorative Three.js geometry, <b>not</b> a Maxwell solver — the real finite-difference
+    (FDTD) physics lives in the native Rust app:
+    <a href="https://github.com/springyworks/hopf-sta-viz">github.com/springyworks/hopf-sta-viz</a>.
+  </div>
+
+  <div id="control-panel">
+    <button id="demo-btn" class="active">DEMO MODE: ON</button>
+    <div class="control-group">
+      <label for="preset-select">Preset:</label>
+      <select id="preset-select">
+        <option value="demo">Demo (Auto-Cycle)</option>
+        <option value="fundamental">Fundamental Hopfion</option>
+        <option value="photon">Single Photon State</option>
+        <option value="trefoil">Trefoil Configuration</option>
+        <option value="linked">Linked Rings</option>
+        <option value="complex">Complex Knot</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label for="p-slider">Poloidal winding (p):</label>
+      <input type="range" id="p-slider" min="1" max="10" value="1" step="1" disabled />
+      <span id="p-val" style="min-width: 15px; font-family: monospace;">1</span>
+    </div>
+    <div class="control-group">
+      <label for="q-slider">Toroidal winding (q):</label>
+      <input type="range" id="q-slider" min="1" max="10" value="1" step="1" disabled />
+      <span id="q-val" style="min-width: 15px; font-family: monospace;">1</span>
+    </div>
+  </div>
+
+  <div id="canvas-container">
+    <div id="hud-overlay">Initializing telemetry…</div>
+  </div>
+
+  <!-- Logic is authored in TypeScript (src/main.ts) and compiled to this generated module. -->
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

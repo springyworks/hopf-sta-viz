@@ -1,0 +1,17 @@
+# Rust / Cargo build output
+/target/
+
+# Runtime artifacts written by the app into the working directory
+# (timestamped preset dumps, and the in-app F1 remark log)
+/preset-*.json
+/ui-remarks.json
+
+# Node tooling for the web/ demo source (typescript is the only devDependency)
+node_modules/
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/

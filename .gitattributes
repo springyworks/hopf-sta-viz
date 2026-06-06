@@ -1,0 +1,6 @@
+# Mark compiler-generated output so GitHub language stats ignore it.
+docs/main.js linguist-generated=true
+Cargo.lock   linguist-generated=true
+
+# Normalize line endings for text sources.
+* text=auto eol=lf
