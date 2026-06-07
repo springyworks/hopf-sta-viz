@@ -924,7 +924,7 @@ impl State {
         // The +x flight axis is 3× the square cross-section. Native uses a fat
         // grid; the browser (tighter GPU memory limits) uses a lighter one.
         #[cfg(not(target_arch = "wasm32"))]
-        let (cross_n, fdtd_particles) = (128u32, 600_000u32);  // 384×128×128
+        let (cross_n, fdtd_particles) = (160u32, 900_000u32);  // 480×160×160 ≈ 12.3M cells — feed the GPU
         #[cfg(target_arch = "wasm32")]
         let (cross_n, fdtd_particles) = (64u32, 220_000u32);   // 192×64×64
         let fdtd = crate::fdtd::FdtdState::new(

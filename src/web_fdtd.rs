@@ -27,17 +27,46 @@
 
 use glam::Vec3;
 
+/// The transverse Spacetime-Algebra field pattern a launch carries.
+///
+/// Every shape is built as a **null** field: pick a transverse electric pattern
+/// E⟂(y,z) and set the magnetic part to **B = x̂ × E**. Then
+///
+///   * E ⟂ B and |E| = |B|  ⇒  F² = 0  — the hopfion null condition the README
+///     cites for `F = E + I c B`, and
+///   * S = E × B = |E|² x̂      — the Poynting flux points straight down the +X
+///     flight axis for *every* shape, so the pulse always fires forward and the
+///     Yee solver then evolves it under the real curl equations.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// Rañada–Hopf null ring: azimuthal E, linked E/B circles (Hopf index 1).
+    Hopfion,
+    /// The same field at a tighter, single-photon core scale.
+    PhotonHopfion,
+    /// Hellwarth–Nouchi "flying doughnut": a toroidal single-cycle pulse.
+    FlyingDonut,
+    /// Radial (TM) doughnut — E points outward, B circles around it.
+    RadialDonut,
+    /// Linearly-polarized Gaussian photon (E along ŷ).
+    PlanePhoton,
+    /// Circularly-polarized photon (E rotates along the propagation axis).
+    CpPhoton,
+    /// Trefoil knot: an m = 2 twisted ring (Hopf index 2).
+    Trefoil,
+    /// Phased-array launcher: a wide aperture with a transverse phase ramp, so
+    /// the emitted beam steers off the +X axis.
+    PhasedArray,
+}
+
 /// What the launch source looks like in the transverse (Y/Z) plane.
 #[derive(Copy, Clone, Debug)]
 pub struct SourceSpec {
     /// Drive amplitude.
     pub amp: f32,
-    /// Ring radius in world units (`0` ⇒ a filled Gaussian spot).
+    /// Ring / torus radius in world units (used by the ring-type shapes).
     pub radius: f32,
-    /// `true` ⇒ a full transverse sheet (plane wave) instead of a ring/spot.
-    pub plane: bool,
-    /// Circular-polarization spin (adds a quadrature E_z / B_y component).
-    pub spin: f32,
+    /// Which transverse STA field pattern to launch.
+    pub shape: Shape,
 }
 
 pub struct Fdtd {
@@ -253,29 +282,60 @@ impl Fdtd {
         (lo, hi, cx, wx)
     }
 
-    /// Transverse profile of the source at world (y, z) for the given shape.
+    /// Transverse electric pattern **E⟂(y, z)** for a shape, already carrying its
+    /// own oscillation through the longitudinal phase `psi`. The magnetic part is
+    /// recovered by the caller as B = x̂ × E (null field). Returns `(e_y, e_z)`.
     #[inline]
-    fn transverse(spec: &SourceSpec, y: f32, z: f32) -> f32 {
-        if spec.plane {
-            // Soft-edged sheet across the cross-section.
-            let r = (y * y + z * z).sqrt();
-            (-(r * r) / 9.0).exp()
-        } else if spec.radius <= 1e-3 {
-            let r2 = y * y + z * z;
-            (-(r2) / 0.6).exp()
-        } else {
-            let r = (y * y + z * z).sqrt();
-            let d = (r - spec.radius) / 0.45;
-            (-(d * d)).exp()
+    fn e_perp(spec: &SourceSpec, y: f32, z: f32, psi: f32) -> (f32, f32) {
+        let r0 = spec.radius;
+        match spec.shape {
+            // Azimuthal E on a Gaussian torus of radius r0 → linked null ring.
+            Shape::Hopfion | Shape::PhotonHopfion | Shape::FlyingDonut => {
+                let rho = (y * y + z * z).sqrt().max(1e-4);
+                let g = (-(((rho - r0) / 0.45).powi(2))).exp() * psi.sin();
+                (-z / rho * g, y / rho * g)
+            }
+            // Radial E (TM doughnut): E points outward, B = x̂×E circles it.
+            Shape::RadialDonut => {
+                let rho = (y * y + z * z).sqrt().max(1e-4);
+                let g = (-(((rho - r0) / 0.45).powi(2))).exp() * psi.sin();
+                (y / rho * g, z / rho * g)
+            }
+            // Azimuthal ring with an m = 2 amplitude twist → index-2 trefoil look.
+            Shape::Trefoil => {
+                let rho = (y * y + z * z).sqrt().max(1e-4);
+                let th = z.atan2(y);
+                let g = (-(((rho - r0) / 0.5).powi(2))).exp()
+                    * (0.55 + 0.45 * (2.0 * th).cos())
+                    * psi.sin();
+                (-z / rho * g, y / rho * g)
+            }
+            // Linearly-polarized Gaussian spot (E along ŷ).
+            Shape::PlanePhoton => {
+                let s = (-((y * y + z * z) / 4.0)).exp() * psi.sin();
+                (s, 0.0)
+            }
+            // Circular polarization: E rotates with the longitudinal phase.
+            Shape::CpPhoton => {
+                let s = (-((y * y + z * z) / 2.2)).exp();
+                (s * psi.cos(), s * psi.sin())
+            }
+            // Wide aperture; the transverse steering ramp is folded into `psi`
+            // by the caller, so the launched wavefront tilts off-axis.
+            Shape::PhasedArray => {
+                let s = (-((y * y + z * z) / 12.0)).exp() * psi.sin();
+                (s, 0.0)
+            }
         }
     }
 
     /// Continuously driven soft source (call each substep with advancing phase).
-    /// E_y and B_z are driven in phase so S = E × B points +X (forward beam).
+    /// The transverse pattern is the shape's null field and B = x̂ × E, so the
+    /// injected energy flux S = E × B points +X (a steady forward beam).
     pub fn drive(&mut self, spec: &SourceSpec, phase: f32) {
-        let s = phase.sin();
-        let sq = (phase + std::f32::consts::FRAC_PI_2).sin(); // quadrature for spin
         let (lo, hi, cx, wx) = self.source_x_window();
+        // Phased array steers by a transverse phase ramp across the aperture.
+        let steer = if spec.shape == Shape::PhasedArray { 0.9 } else { 0.0 };
         for i in lo..=hi {
             let lx = (self.world_x(i) - cx) / wx;
             let env = (-(lx * lx)).exp();
@@ -283,48 +343,64 @@ impl Fdtd {
                 let z = self.world_z(k);
                 for j in 0..self.ny {
                     let y = self.world_y(j);
-                    let a = spec.amp * env * Self::transverse(spec, y, z);
-                    if a < 1e-4 {
+                    let psi = phase + steer * y;
+                    let (ey0, ez0) = Self::e_perp(spec, y, z, psi);
+                    if ey0.abs() + ez0.abs() < 1e-4 {
                         continue;
                     }
                     let idx = self.lin(i, j, k);
                     if self.mask[idx] {
                         continue;
                     }
-                    self.e[idx].y += a * s;
-                    self.b[idx].z += a * s;
-                    if spec.spin.abs() > 1e-3 {
-                        self.e[idx].z += a * spec.spin * sq;
-                        self.b[idx].y -= a * spec.spin * sq;
-                    }
+                    let ey = spec.amp * env * ey0;
+                    let ez = spec.amp * env * ez0;
+                    // null field: B = x̂ × E = (0, −E_z, E_y).
+                    self.e[idx].y += ey;
+                    self.e[idx].z += ez;
+                    self.b[idx].y += -ez;
+                    self.b[idx].z += ey;
                 }
             }
         }
     }
 
-    /// Stamp a one-shot forward wave packet (the "Inject pulse" button): a
-    /// Gaussian-enveloped single cycle that propagates toward the mirror.
-    pub fn inject_packet(&mut self, spec: &SourceSpec) {
+    /// Stamp a well-initialized forward-propagating 3-D pulse for the selected
+    /// STA shape — the **[Fire]** payload. A longitudinal Gaussian envelope
+    /// carries a single spatial cycle; the transverse pattern is the shape's
+    /// null field (B = x̂ × E), so the packet flies +X the instant the Yee
+    /// solver takes over. The amplitude floor guarantees [Fire] always produces
+    /// something visible, however the sliders are set.
+    pub fn stamp_pulse(&mut self, spec: &SourceSpec) {
+        let amp = spec.amp.max(0.25);
         let cx = -0.45 * self.half_x;
         let wx = 0.16 * self.half_x;
         let lo = self.to_grid(Vec3::new(cx - 3.0 * wx, 0.0, 0.0)).0.floor().max(0.0) as usize;
         let hi = (self.to_grid(Vec3::new(cx + 3.0 * wx, 0.0, 0.0)).0.ceil() as usize).min(self.nx - 1);
-        let k_wave = std::f32::consts::TAU / (0.55 * wx).max(1.0);
+        let k_wave = std::f32::consts::TAU / (0.70 * wx).max(1.0);
+        let steer = if spec.shape == Shape::PhasedArray { 0.8 } else { 0.0 };
         for i in lo..=hi {
             let lx = self.world_x(i) - cx;
             let env = (-(lx / wx) * (lx / wx)).exp();
-            let osc = (k_wave * lx).sin();
             for k in 0..self.nz {
                 let z = self.world_z(k);
                 for j in 0..self.ny {
                     let y = self.world_y(j);
-                    let a = 1.6 * spec.amp * env * osc * Self::transverse(spec, y, z);
+                    // spatial carrier (+ phased-array steering ramp).
+                    let psi = k_wave * lx + steer * y;
+                    let (ey0, ez0) = Self::e_perp(spec, y, z, psi);
+                    let ey = amp * env * ey0;
+                    let ez = amp * env * ez0;
+                    if ey.abs() + ez.abs() < 1e-5 {
+                        continue;
+                    }
                     let idx = self.lin(i, j, k);
                     if self.mask[idx] {
                         continue;
                     }
-                    self.e[idx].y += a;
-                    self.b[idx].z += a;
+                    self.e[idx].y += ey;
+                    self.e[idx].z += ez;
+                    self.b[idx].y += -ez;
+                    self.b[idx].z += ey;
                 }
             }
         }
@@ -377,6 +453,12 @@ impl Fdtd {
     #[inline]
     pub fn sample_b(&self, w: Vec3) -> Vec3 {
         Self::sample(&self.b, self, w)
+    }
+
+    /// Electric field at a world point (for the E field-line view).
+    #[inline]
+    pub fn sample_e(&self, w: Vec3) -> Vec3 {
+        Self::sample(&self.e, self, w)
     }
 
     /// `true` if the world point sits inside a PEC mirror cell.

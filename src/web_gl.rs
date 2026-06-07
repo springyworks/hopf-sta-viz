@@ -30,11 +30,12 @@ use web_time::Instant;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::camera::OrbitCamera;
+use crate::web_fdtd::Shape;
 
 /// Cross-section half-extent of the flight box (the Y/Z half-size, world units).
 const WORLD_R: f32 = 4.0;
@@ -42,11 +43,13 @@ const WORLD_R: f32 = 4.0;
 const DEFAULT_PARTICLES: usize = 45_000;
 /// Seconds before a tracer respawns at the −X source (drives the render fade).
 const MAX_AGE: f32 = 8.0;
-/// Transverse FDTD grid resolution (cells across Y/Z). The X axis is stretched
-/// to match the longer physical box. Kept modest because the Yee solver runs
-/// single-threaded on the CPU in WASM (no GPU compute on WebGL2).
-const CROSS_N: usize = 26;
-/// Live field-line build sizes (Lines render mode = magnetic field lines).
+/// Default transverse FDTD grid resolution (cells across Y/Z). The X axis is
+/// stretched to match the longer physical box. Live-tunable from the panel
+/// ("Grid (cross cells)") so you can crank the per-cell Maxwell crunching up
+/// until the machine works for it; the Yee solver runs single-threaded on the
+/// CPU in WASM (no GPU compute on WebGL2).
+const CROSS_N: usize = 34;
+/// Live field-line build sizes (E and/or B field-line tracing).
 const STREAM_SEEDS: usize = 900;
 const STREAM_STEPS: usize = 40;
 const STREAM_DS:    f32   = 0.14;
@@ -54,62 +57,105 @@ const STREAM_CAP:   usize = STREAM_SEEDS * STREAM_STEPS * 2;
 /// Vertex capacity for the tilted end-mirror wireframe.
 const MIRROR_CAP: usize = 64;
 
+/// Two-colour field-line tints used by the E / B / E&B views.
+const E_LINE_RGB: [f32; 3] = [0.30, 0.85, 1.00]; // electric → cyan
+const B_LINE_RGB: [f32; 3] = [1.00, 0.35, 0.85]; // magnetic → magenta
+
 // ---------------------------------------------------------------------------
 // UI-facing settings (driven by the egui control panel).
 // ---------------------------------------------------------------------------
 
-/// The launch-source shape fed into the FDTD grid near the −X entrance. The
-/// real Yee solver then propagates a genuine electromagnetic field from it.
+/// The launch-source shape fed into the FDTD grid near the −X entrance. Each is
+/// a Spacetime-Algebra **null** field (see `web_fdtd::Shape`); the real Yee
+/// solver then propagates a genuine electromagnetic field from it.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum WebPreset {
     Hopfion,
     PhotonHopfion,
-    Trefoil,
-    Donut,
+    FlyingDonut,
+    RadialDonut,
     PlanePhoton,
     CpPhoton,
+    Trefoil,
+    PhasedArray,
 }
 
 impl WebPreset {
     const ALL: &'static [WebPreset] = &[
-        WebPreset::Hopfion, WebPreset::PhotonHopfion, WebPreset::Trefoil,
-        WebPreset::Donut, WebPreset::PlanePhoton, WebPreset::CpPhoton,
+        WebPreset::Hopfion, WebPreset::PhotonHopfion, WebPreset::FlyingDonut,
+        WebPreset::RadialDonut, WebPreset::PlanePhoton, WebPreset::CpPhoton,
+        WebPreset::Trefoil, WebPreset::PhasedArray,
     ];
     fn label(self) -> &'static str {
         match self {
-            WebPreset::Hopfion       => "Ring source (medium)",
-            WebPreset::PhotonHopfion => "Ring source (tight)",
-            WebPreset::Trefoil       => "Wide ring source",
-            WebPreset::Donut         => "Gaussian spot",
-            WebPreset::PlanePhoton   => "Plane sheet",
-            WebPreset::CpPhoton      => "Spinning ring (circular)",
+            WebPreset::Hopfion       => "Hopfion · linked null ring (index 1)",
+            WebPreset::PhotonHopfion => "Photon hopfion · tight core",
+            WebPreset::FlyingDonut   => "Flying donut · Hellwarth–Nouchi",
+            WebPreset::RadialDonut   => "Radial donut · TM (E outward)",
+            WebPreset::PlanePhoton   => "Plane photon · linear pol",
+            WebPreset::CpPhoton      => "CP photon · circular pol",
+            WebPreset::Trefoil       => "Trefoil · m=2 twist (index 2)",
+            WebPreset::PhasedArray   => "Phased array · steered beam",
         }
     }
 
-    /// Transverse profile (and circular spin) of the soft source for this preset.
-    fn source_spec(self, power: f32) -> crate::web_fdtd::SourceSpec {
-        use crate::web_fdtd::SourceSpec;
+    /// Map the UI preset to its Spacetime-Algebra null-field pattern.
+    fn shape(self) -> Shape {
         match self {
-            WebPreset::Hopfion       => SourceSpec { amp: power, radius: 1.6, plane: false, spin: 0.0 },
-            WebPreset::PhotonHopfion => SourceSpec { amp: power, radius: 1.0, plane: false, spin: 0.0 },
-            WebPreset::Trefoil       => SourceSpec { amp: power, radius: 2.4, plane: false, spin: 0.0 },
-            WebPreset::Donut         => SourceSpec { amp: power, radius: 0.0, plane: false, spin: 0.0 },
-            WebPreset::PlanePhoton   => SourceSpec { amp: power, radius: 0.0, plane: true,  spin: 0.0 },
-            WebPreset::CpPhoton      => SourceSpec { amp: power, radius: 1.6, plane: false, spin: 1.0 },
+            WebPreset::Hopfion       => Shape::Hopfion,
+            WebPreset::PhotonHopfion => Shape::PhotonHopfion,
+            WebPreset::FlyingDonut   => Shape::FlyingDonut,
+            WebPreset::RadialDonut   => Shape::RadialDonut,
+            WebPreset::PlanePhoton   => Shape::PlanePhoton,
+            WebPreset::CpPhoton      => Shape::CpPhoton,
+            WebPreset::Trefoil       => Shape::Trefoil,
+            WebPreset::PhasedArray   => Shape::PhasedArray,
         }
+    }
+
+    /// Ring / torus radius (world units) for the ring-type shapes; 0 for spots.
+    fn radius(self) -> f32 {
+        match self {
+            WebPreset::Hopfion       => 1.6,
+            WebPreset::PhotonHopfion => 1.0,
+            WebPreset::FlyingDonut   => 1.9,
+            WebPreset::RadialDonut   => 1.6,
+            WebPreset::Trefoil       => 2.2,
+            WebPreset::PlanePhoton | WebPreset::CpPhoton | WebPreset::PhasedArray => 0.0,
+        }
+    }
+
+    /// Build the FDTD source spec (transverse null-field pattern) for this shape.
+    fn source_spec(self, power: f32) -> crate::web_fdtd::SourceSpec {
+        crate::web_fdtd::SourceSpec { amp: power, radius: self.radius(), shape: self.shape() }
+    }
+
+    /// The next shape in the cycle (wraps) — drives the [Next demo] button.
+    fn next(self) -> WebPreset {
+        let all = WebPreset::ALL;
+        let i = all.iter().position(|&p| p == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
     }
 }
 
+/// Which slice of the Faraday bivector F = E + I·c·B to draw, and how.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum WebRenderMode {
-    Particles,
-    Lines,
+enum WebField {
+    /// Energy flow: a tracer cloud riding the live S = E × B (preset tint).
+    Poynting,
+    /// Electric field lines (cyan).
+    E,
+    /// Magnetic field lines (magenta).
+    B,
+    /// Both E (cyan) and B (magenta) at once — the linked two-colour view.
+    Both,
 }
 
 #[derive(Copy, Clone, Debug)]
 struct WebSettings {
     preset:         WebPreset,
-    render_mode:    WebRenderMode,
+    field:          WebField,
+    cross_n:        u32,   // transverse FDTD cells (Y/Z); X is stretched to match
     len_mult:       f32,   // box length along +X, in cross-sections (1..5, default 3)
     mirror_deg:     f32,   // tilt of the PEC end mirror (degrees)
     mirror_on:      bool,  // is the reflecting wall present?
@@ -120,8 +166,10 @@ struct WebSettings {
     advect:         f32,   // tracer Poynting-advection gain
     brightness:     f32,   // particle / streamline alpha
     particle_count: u32,   // tracer cloud size (applied on reseed)
+    drive_on:       bool,  // keep the continuous soft source running?
     reseed:         bool,
-    inject:         bool,  // one-shot "Inject pulse" request
+    fire:           bool,  // [Fire]: clear the grid + stamp a fresh STA pulse
+    inject:         bool,  // one-shot "Inject pulse" (stamp without clearing)
     clear:          bool,  // "Clear field" request
     fit:            bool,
 }
@@ -130,7 +178,8 @@ impl Default for WebSettings {
     fn default() -> Self {
         Self {
             preset:         WebPreset::Hopfion,
-            render_mode:    WebRenderMode::Particles,
+            field:          WebField::Poynting,
+            cross_n:        CROSS_N as u32,
             len_mult:       3.0,
             mirror_deg:     25.0,
             mirror_on:      true,
@@ -141,7 +190,9 @@ impl Default for WebSettings {
             advect:         5.0,
             brightness:     1.8,
             particle_count: DEFAULT_PARTICLES as u32,
+            drive_on:       true,
             reseed:         false,
+            fire:           true,   // launch a pulse on first frame (always animated)
             inject:         false,
             clear:          false,
             fit:            false,
@@ -310,6 +361,7 @@ impl ApplicationHandler<UserEvent> for GlApp {
                     state.camera.zoom(factor);
                 }
             }
+            WindowEvent::Touch(touch) => state.handle_touch(touch, egui_consumed),
             _ => {}
         }
     }
@@ -350,10 +402,16 @@ struct GlState {
     mirror_vbuf:       wgpu::Buffer,
     mirror_vert_count: u32,
 
-    // CPU-built streamlines (Lines render mode)
+    // CPU-built field lines — magnetic B (magenta).
     line_vbuf:       wgpu::Buffer,
     line_vert_count: u32,
     line_scratch:    Vec<LineVertex>,
+    // CPU-built field lines — electric E (cyan), for the E / E&B views.
+    eline_vbuf:       wgpu::Buffer,
+    eline_vert_count: u32,
+    eline_scratch:    Vec<LineVertex>,
+    eline_color:      wgpu::Buffer,
+    eline_bind:       wgpu::BindGroup,
 
     // CPU simulation — real Yee-grid Maxwell FDTD (see web_fdtd.rs)
     fdtd:      crate::web_fdtd::Fdtd,
@@ -365,6 +423,7 @@ struct GlState {
     settings:        WebSettings,
     allocated:       usize,
     last_len:        f32,
+    last_cross:      u32,
     last_mirror_deg: f32,
     last_mirror_on:  bool,
 
@@ -378,6 +437,14 @@ struct GlState {
     mouse_pos: PhysicalPosition<f64>,
     rmb_down:  bool,
     mmb_down:  bool,
+
+    // touch (mobile) — active touch points + last 2-finger pinch baseline
+    touches:    Vec<(u64, PhysicalPosition<f64>)>,
+    pinch_dist: f32,
+    pinch_mid:  (f64, f64),
+    /// On-screen 3-D viewport in physical px [x, y, w, h]; on a narrow phone
+    /// layout this is only the strip above the control sheet. Also sets aspect.
+    scene_px:   [f32; 4],
 
     // UI
     egui_ctx:      egui::Context,
@@ -500,7 +567,18 @@ impl GlState {
         let stream_color = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("stream-color"),
             contents: bytemuck::bytes_of(&RenderParams {
-                color: [0.55, 1.00, 0.75, 1.6],
+                color: [B_LINE_RGB[0], B_LINE_RGB[1], B_LINE_RGB[2], 1.6], // B field → magenta
+                flow_phase: 0.0,
+                steps_per_line: STREAM_STEPS as u32,
+                _pad0: 0,
+                _pad1: 0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let eline_color = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("eline-color"),
+            contents: bytemuck::bytes_of(&RenderParams {
+                color: [E_LINE_RGB[0], E_LINE_RGB[1], E_LINE_RGB[2], 1.6], // E field → cyan
                 flow_phase: 0.0,
                 steps_per_line: STREAM_STEPS as u32,
                 _pad0: 0,
@@ -568,6 +646,14 @@ impl GlState {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: stream_color.as_entire_binding() },
+            ],
+        });
+        let eline_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("eline-bind"),
+            layout: &camera_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: eline_color.as_entire_binding() },
             ],
         });
         let mirror_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -694,7 +780,7 @@ impl GlState {
         let half_x_init = WORLD_R * settings.len_mult;
 
         // Real CPU Yee-grid Maxwell solver (the genuine field the page shows).
-        let mut fdtd = crate::web_fdtd::Fdtd::new(CROSS_N, WORLD_R, half_x_init);
+        let mut fdtd = crate::web_fdtd::Fdtd::new(settings.cross_n as usize, WORLD_R, half_x_init);
         fdtd.set_mirror(settings.mirror_deg.to_radians(), settings.mirror_on);
 
         let mut rng: u32 = 0xC0FFEE_u32;
@@ -745,9 +831,15 @@ impl GlState {
             bytemuck::cast_slice(&mirror_verts[..mirror_vert_count as usize]),
         );
 
-        // Streamline vertex buffer (CPU-rebuilt each frame in Lines mode).
+        // Streamline vertex buffer (CPU-rebuilt each frame in field-line mode).
         let line_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stream-vbuf"),
+            size: (STREAM_CAP * std::mem::size_of::<LineVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let eline_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("eline-vbuf"),
             size: (STREAM_CAP * std::mem::size_of::<LineVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -784,6 +876,11 @@ impl GlState {
             line_vbuf,
             line_vert_count: 0,
             line_scratch: Vec::with_capacity(STREAM_CAP),
+            eline_vbuf,
+            eline_vert_count: 0,
+            eline_scratch: Vec::with_capacity(STREAM_CAP),
+            eline_color,
+            eline_bind,
             fdtd,
             particles,
             upload,
@@ -791,6 +888,7 @@ impl GlState {
             settings,
             allocated,
             last_len: settings.len_mult,
+            last_cross: settings.cross_n,
             last_mirror_deg: settings.mirror_deg,
             last_mirror_on: settings.mirror_on,
             source_phase: 0.0,
@@ -801,6 +899,10 @@ impl GlState {
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             rmb_down: false,
             mmb_down: false,
+            touches: Vec::new(),
+            pinch_dist: 0.0,
+            pinch_mid: (0.0, 0.0),
+            scene_px: [0.0, 0.0, size.width as f32, size.height as f32],
             egui_ctx,
             egui_winit,
             egui_renderer,
@@ -816,6 +918,76 @@ impl GlState {
         self.surface.configure(&self.device, &self.config);
         self.depth_view = make_depth(&self.device, size.width, size.height);
         self.camera.aspect = size.width as f32 / size.height as f32;
+    }
+
+    /// Mobile multi-touch navigation: **one finger orbits**, **two fingers
+    /// pinch-zoom and pan** — the important 3-D gestures on a phone. Gated by
+    /// `egui_consumed` so dragging on the control sheet never moves the camera.
+    fn handle_touch(&mut self, touch: Touch, egui_consumed: bool) {
+        let id = touch.id;
+        let loc = touch.location;
+        match touch.phase {
+            TouchPhase::Started => {
+                if !self.touches.iter().any(|(t, _)| *t == id) {
+                    self.touches.push((id, loc));
+                }
+                self.reset_pinch();
+            }
+            TouchPhase::Moved => {
+                let prev = self.touches.iter().find(|(t, _)| *t == id).map(|(_, p)| *p);
+                if let Some(slot) = self.touches.iter_mut().find(|(t, _)| *t == id) {
+                    slot.1 = loc;
+                }
+                if egui_consumed {
+                    return;
+                }
+                match self.touches.len() {
+                    1 => {
+                        if let Some(prev) = prev {
+                            let dx = (loc.x - prev.x) as f32;
+                            let dy = (loc.y - prev.y) as f32;
+                            self.camera.orbit(dx, dy);
+                        }
+                    }
+                    n if n >= 2 => {
+                        let a = self.touches[0].1;
+                        let b = self.touches[1].1;
+                        let dist =
+                            (((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()) as f32;
+                        let mid = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+                        if self.pinch_dist > 1.0 {
+                            // spread fingers → zoom in; pinch → zoom out
+                            let factor = (self.pinch_dist / dist.max(1.0)).clamp(0.5, 2.0);
+                            self.camera.zoom(factor);
+                            // two-finger drag pans the target
+                            let pdx = (mid.0 - self.pinch_mid.0) as f32;
+                            let pdy = (mid.1 - self.pinch_mid.1) as f32;
+                            self.camera.pan(pdx, pdy);
+                        }
+                        self.pinch_dist = dist;
+                        self.pinch_mid = mid;
+                    }
+                    _ => {}
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.touches.retain(|(t, _)| *t != id);
+                self.reset_pinch();
+            }
+        }
+    }
+
+    /// Re-baseline the pinch gesture whenever the finger count changes, so the
+    /// next move doesn't jump the camera.
+    fn reset_pinch(&mut self) {
+        if self.touches.len() >= 2 {
+            let a = self.touches[0].1;
+            let b = self.touches[1].1;
+            self.pinch_dist = (((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()) as f32;
+            self.pinch_mid = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        } else {
+            self.pinch_dist = 0.0;
+        }
     }
 
     fn update(&mut self) {
@@ -835,23 +1007,34 @@ impl GlState {
             self.settings.clear = false;
             self.fdtd.clear();
         }
+        // [Fire] — the always-do-something button: wipe the grid and stamp a
+        // fresh, well-initialized STA pulse for the selected shape so the user
+        // always sees a clean launch, however the sliders are set.
+        if self.settings.fire {
+            self.settings.fire = false;
+            self.fdtd.clear();
+            let spec = self.settings.preset.source_spec(self.settings.source_power);
+            self.fdtd.stamp_pulse(&spec);
+        }
         if self.settings.inject {
             self.settings.inject = false;
             let spec = self.settings.preset.source_spec(self.settings.source_power);
-            self.fdtd.inject_packet(&spec);
+            self.fdtd.stamp_pulse(&spec);
         }
 
         // --- advance the REAL Maxwell field --------------------------------
-        // Drive the soft source every substep (a continuous forward beam), then
-        // run the Yee leapfrog. The tilted PEC mask reflects it; the −X entrance
-        // and the side walls absorb. This is genuine FDTD — E and B evolved by
-        // curl equations — not a ballistic "ball" approximation.
+        // Optionally drive the soft source every substep (a continuous forward
+        // beam), then run the Yee leapfrog. The tilted PEC mask reflects it; the
+        // −X entrance and the side walls absorb. This is genuine FDTD — E and B
+        // evolved by curl equations — not a ballistic "ball" approximation.
         let substeps = self.settings.sim_speed.max(1);
         let spec = self.settings.preset.source_spec(self.settings.source_power);
         let sigma = self.settings.absorb;
         for _ in 0..substeps {
             self.source_phase += self.settings.source_freq;
-            self.fdtd.drive(&spec, self.source_phase);
+            if self.settings.drive_on {
+                self.fdtd.drive(&spec, self.source_phase);
+            }
             self.fdtd.step(1, sigma, 0.06);
         }
 
@@ -885,6 +1068,9 @@ impl GlState {
             .write_buffer(&self.particle_vbuf, 0, bytemuck::cast_slice(&self.upload));
 
         // Uniforms: camera + per-pass colour / flow phase.
+        // Match the camera aspect to the on-screen 3-D viewport (which, on a
+        // narrow phone layout, is only the strip above the control sheet).
+        self.camera.aspect = self.scene_px[2].max(1.0) / self.scene_px[3].max(1.0);
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&self.camera.uniform()));
         let col = preset_color(preset);
@@ -896,14 +1082,23 @@ impl GlState {
             _pad1: 0,
         };
         self.queue.write_buffer(&self.particle_color, 0, bytemuck::bytes_of(&pr));
-        let sr = RenderParams {
-            color: [col[0], col[1], col[2], self.settings.brightness * 0.9],
+        // B field lines → magenta; E field lines → cyan (the two-colour view).
+        let br = RenderParams {
+            color: [B_LINE_RGB[0], B_LINE_RGB[1], B_LINE_RGB[2], self.settings.brightness * 0.95],
             flow_phase: self.flow_phase,
             steps_per_line: STREAM_STEPS as u32,
             _pad0: 0,
             _pad1: 0,
         };
-        self.queue.write_buffer(&self.stream_color, 0, bytemuck::bytes_of(&sr));
+        self.queue.write_buffer(&self.stream_color, 0, bytemuck::bytes_of(&br));
+        let er = RenderParams {
+            color: [E_LINE_RGB[0], E_LINE_RGB[1], E_LINE_RGB[2], self.settings.brightness * 0.95],
+            flow_phase: self.flow_phase,
+            steps_per_line: STREAM_STEPS as u32,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.queue.write_buffer(&self.eline_color, 0, bytemuck::bytes_of(&er));
         let bp = RenderParams {
             color: [0.40, 0.55, 1.00, 1.0],
             flow_phase: self.flow_phase,
@@ -921,8 +1116,11 @@ impl GlState {
         };
         self.queue.write_buffer(&self.mirror_color, 0, bytemuck::bytes_of(&mp));
 
-        if self.settings.render_mode == WebRenderMode::Lines {
-            self.rebuild_streamlines();
+        match self.settings.field {
+            WebField::Poynting => {}
+            WebField::E => self.rebuild_field_lines(true, false),
+            WebField::B => self.rebuild_field_lines(false, true),
+            WebField::Both => self.rebuild_field_lines(true, true),
         }
     }
 
@@ -937,7 +1135,20 @@ impl GlState {
             self.queue
                 .write_buffer(&self.box_vbuf, 0, bytemuck::cast_slice(&verts));
             // Resize the grid to the new box and re-carve the PEC mirror.
-            self.fdtd = crate::web_fdtd::Fdtd::new(CROSS_N, WORLD_R, half_x);
+            self.fdtd = crate::web_fdtd::Fdtd::new(self.settings.cross_n as usize, WORLD_R, half_x);
+            self.fdtd
+                .set_mirror(self.settings.mirror_deg.to_radians(), self.settings.mirror_on);
+            self.upload_mirror(half_x);
+            self.reseed();
+        }
+
+        // Grid resolution changed → rebuild the Yee grid at the new cross count.
+        // More cells = far more Maxwell crunching per substep (cost ~ cross_n³),
+        // so this is the knob that makes the CPU actually work for the field.
+        if self.settings.cross_n != self.last_cross {
+            self.last_cross = self.settings.cross_n;
+            let half_x = WORLD_R * self.settings.len_mult;
+            self.fdtd = crate::web_fdtd::Fdtd::new(self.settings.cross_n as usize, WORLD_R, half_x);
             self.fdtd
                 .set_mirror(self.settings.mirror_deg.to_radians(), self.settings.mirror_on);
             self.upload_mirror(half_x);
@@ -1014,50 +1225,56 @@ impl GlState {
         self.mirror_vert_count = n as u32;
     }
 
-    /// Trace live magnetic field lines through the FDTD grid into `line_scratch`.
-    fn rebuild_streamlines(&mut self) {
-        self.line_scratch.clear();
+    /// Trace live field lines through the FDTD grid. `do_e` fills the cyan E
+    /// buffer; `do_b` fills the magenta B buffer; both share one seed lattice.
+    fn rebuild_field_lines(&mut self, do_e: bool, do_b: bool) {
         let half_x = WORLD_R * self.settings.len_mult;
-        // Seed a coarse lattice across the box and follow B from each point.
+        if do_e {
+            self.eline_scratch.clear();
+        }
+        if do_b {
+            self.line_scratch.clear();
+        }
+        // Seed a coarse lattice across the box and follow each field from there.
         let nx_seed = 14i32;
         let nr_seed = 8i32;
-        'seeds: for ix in 0..nx_seed {
+        for ix in 0..nx_seed {
             let fx = (ix as f32 + 0.5) / nx_seed as f32;
             let x0 = -half_x + fx * 2.0 * half_x;
             for iy in 0..nr_seed {
                 for iz in 0..nr_seed {
                     let y0 = (iy as f32 + 0.5) / nr_seed as f32 * 2.0 * WORLD_R - WORLD_R;
                     let z0 = (iz as f32 + 0.5) / nr_seed as f32 * 2.0 * WORLD_R - WORLD_R;
-                    let mut q = Vec3::new(x0, y0 * 0.85, z0 * 0.85);
-                    let mut prev = q;
-                    for _ in 0..STREAM_STEPS {
-                        let f = self.fdtd.sample_b(q);
-                        let m = f.length();
-                        if m <= 1e-4 {
-                            break;
-                        }
-                        q += (f / m) * STREAM_DS;
-                        let mag = (m * 2.0).min(1.0);
-                        self.line_scratch.push(LineVertex { pos: [prev.x, prev.y, prev.z], mag });
-                        self.line_scratch.push(LineVertex { pos: [q.x, q.y, q.z], mag });
-                        prev = q;
-                        let out = q.x.abs() > half_x || q.y.abs() > WORLD_R || q.z.abs() > WORLD_R;
-                        if out || self.line_scratch.len() >= STREAM_CAP {
-                            break;
-                        }
+                    let seed = Vec3::new(x0, y0 * 0.85, z0 * 0.85);
+                    if do_e {
+                        trace_field_line(&self.fdtd, seed, half_x, true, &mut self.eline_scratch);
                     }
-                    if self.line_scratch.len() >= STREAM_CAP {
-                        break 'seeds;
+                    if do_b {
+                        trace_field_line(&self.fdtd, seed, half_x, false, &mut self.line_scratch);
                     }
                 }
             }
         }
-        let n = self.line_scratch.len().min(STREAM_CAP);
-        if n > 0 {
-            self.queue
-                .write_buffer(&self.line_vbuf, 0, bytemuck::cast_slice(&self.line_scratch[..n]));
+        if do_e {
+            let n = self.eline_scratch.len().min(STREAM_CAP);
+            if n > 0 {
+                self.queue
+                    .write_buffer(&self.eline_vbuf, 0, bytemuck::cast_slice(&self.eline_scratch[..n]));
+            }
+            self.eline_vert_count = n as u32;
+        } else {
+            self.eline_vert_count = 0;
         }
-        self.line_vert_count = n as u32;
+        if do_b {
+            let n = self.line_scratch.len().min(STREAM_CAP);
+            if n > 0 {
+                self.queue
+                    .write_buffer(&self.line_vbuf, 0, bytemuck::cast_slice(&self.line_scratch[..n]));
+            }
+            self.line_vert_count = n as u32;
+        } else {
+            self.line_vert_count = 0;
+        }
     }
 
     fn render(&mut self) {
@@ -1065,11 +1282,24 @@ impl GlState {
         let raw = self.egui_winit.take_egui_input(&self.window);
         let mut settings = self.settings;
         let fps = if self.frame_ms > 0.0 { 1000.0 / self.frame_ms } else { 0.0 };
-        let full = self.egui_ctx.run(raw, |ctx| draw_web_ui(ctx, &mut settings, fps));
+        let mut scene_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(0.0, 0.0));
+        let full = self.egui_ctx.run(raw, |ctx| {
+            scene_rect = draw_web_ui(ctx, &mut settings, fps);
+        });
         self.settings = settings;
         self.egui_winit
             .handle_platform_output(&self.window, full.platform_output);
         let ppp = self.egui_ctx.pixels_per_point();
+        // Convert the scene rect (egui points) to physical px for the GPU
+        // viewport, so the 3-D view sits in the strip above the phone controls.
+        let fw = self.config.width as f32;
+        let fh = self.config.height as f32;
+        let vx = (scene_rect.min.x * ppp).clamp(0.0, fw);
+        let vy = (scene_rect.min.y * ppp).clamp(0.0, fh);
+        let vw = (scene_rect.width() * ppp).clamp(1.0, (fw - vx).max(1.0));
+        let vh = (scene_rect.height() * ppp).clamp(1.0, (fh - vy).max(1.0));
+        self.scene_px = [vx, vy, vw, vh];
         let jobs = self.egui_ctx.tessellate(full.shapes, ppp);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
@@ -1121,6 +1351,12 @@ impl GlState {
                 occlusion_query_set: None,
             });
 
+            // Constrain the 3-D view to the scene viewport (the strip above
+            // the phone control sheet); on desktop this is the whole surface.
+            let [vx, vy, vw, vh] = self.scene_px;
+            rp.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            rp.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
+
             // World box wireframe (the elongated flight tube).
             rp.set_pipeline(&self.line_pipeline);
             rp.set_bind_group(0, &self.box_bind, &[]);
@@ -1135,23 +1371,38 @@ impl GlState {
                 rp.draw(0..self.mirror_vert_count, 0..1);
             }
 
-            match self.settings.render_mode {
-                WebRenderMode::Particles => {
+            match self.settings.field {
+                WebField::Poynting => {
                     rp.set_pipeline(&self.point_pipeline);
                     rp.set_bind_group(0, &self.particle_bind, &[]);
                     rp.set_vertex_buffer(0, self.particle_vbuf.slice(..));
                     rp.draw(0..self.allocated as u32, 0..1);
                 }
-                WebRenderMode::Lines => {
-                    if self.line_vert_count > 0 {
-                        rp.set_pipeline(&self.line_pipeline);
+                WebField::E | WebField::B | WebField::Both => {
+                    rp.set_pipeline(&self.line_pipeline);
+                    // Magenta B lines.
+                    if matches!(self.settings.field, WebField::B | WebField::Both)
+                        && self.line_vert_count > 0
+                    {
                         rp.set_bind_group(0, &self.stream_bind, &[]);
                         rp.set_vertex_buffer(0, self.line_vbuf.slice(..));
                         rp.draw(0..self.line_vert_count, 0..1);
                     }
+                    // Cyan E lines (drawn second so they read over the magenta).
+                    if matches!(self.settings.field, WebField::E | WebField::Both)
+                        && self.eline_vert_count > 0
+                    {
+                        rp.set_bind_group(0, &self.eline_bind, &[]);
+                        rp.set_vertex_buffer(0, self.eline_vbuf.slice(..));
+                        rp.draw(0..self.eline_vert_count, 0..1);
+                    }
                 }
             }
 
+            // Reset to the full surface so egui (overlay + control sheet)
+            // draws across the whole canvas, undistorted.
+            rp.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
+            rp.set_scissor_rect(0, 0, self.config.width, self.config.height);
             self.egui_renderer
                 .render(&mut rp.forget_lifetime(), &jobs, &screen);
         }
@@ -1170,6 +1421,38 @@ impl GlState {
 // electromagnetic energy flow, not an analytic stand-in.
 // ---------------------------------------------------------------------------
 
+/// Integrate one field line from `seed` through `fdtd` (E if `electric`, else B),
+/// pushing line-list segment vertices into `out` (capped at STREAM_CAP).
+fn trace_field_line(
+    fdtd: &crate::web_fdtd::Fdtd,
+    seed: Vec3,
+    half_x: f32,
+    electric: bool,
+    out: &mut Vec<LineVertex>,
+) {
+    if out.len() >= STREAM_CAP {
+        return;
+    }
+    let mut q = seed;
+    let mut prev = q;
+    for _ in 0..STREAM_STEPS {
+        let f = if electric { fdtd.sample_e(q) } else { fdtd.sample_b(q) };
+        let m = f.length();
+        if m <= 1e-4 {
+            break;
+        }
+        q += (f / m) * STREAM_DS;
+        let mag = (m * 2.0).min(1.0);
+        out.push(LineVertex { pos: [prev.x, prev.y, prev.z], mag });
+        out.push(LineVertex { pos: [q.x, q.y, q.z], mag });
+        prev = q;
+        let outside = q.x.abs() > half_x || q.y.abs() > WORLD_R || q.z.abs() > WORLD_R;
+        if outside || out.len() >= STREAM_CAP {
+            break;
+        }
+    }
+}
+
 /// Spawn a tracer near the −X soft source so the forward beam pushes it along.
 /// The transverse spread matches the preset's source profile.
 fn source_seed(rng: &mut u32, half_x: f32, preset: WebPreset) -> Vec3 {
@@ -1177,10 +1460,12 @@ fn source_seed(rng: &mut u32, half_x: f32, preset: WebPreset) -> Vec3 {
     let (radius, plane) = match preset {
         WebPreset::Hopfion       => (1.6, false),
         WebPreset::PhotonHopfion => (1.0, false),
-        WebPreset::Trefoil       => (2.4, false),
-        WebPreset::Donut         => (0.0, false),
+        WebPreset::FlyingDonut   => (1.9, false),
+        WebPreset::RadialDonut   => (1.6, false),
+        WebPreset::Trefoil       => (2.2, false),
         WebPreset::PlanePhoton   => (0.0, true),
-        WebPreset::CpPhoton      => (1.6, false),
+        WebPreset::CpPhoton      => (0.0, false),
+        WebPreset::PhasedArray   => (0.0, true),
     };
     if plane {
         let y = (lcg(rng) - 0.5) * 1.7 * WORLD_R;
@@ -1202,10 +1487,12 @@ fn preset_color(preset: WebPreset) -> [f32; 3] {
     match preset {
         WebPreset::Hopfion       => [0.55, 1.00, 0.75], // mint
         WebPreset::PhotonHopfion => [0.45, 0.90, 1.00], // cyan
-        WebPreset::Trefoil       => [0.80, 0.60, 1.00], // violet
-        WebPreset::Donut         => [1.00, 0.75, 0.40], // amber
+        WebPreset::FlyingDonut   => [1.00, 0.75, 0.40], // amber
+        WebPreset::RadialDonut   => [1.00, 0.58, 0.30], // orange
         WebPreset::PlanePhoton   => [0.70, 1.00, 0.50], // lime
         WebPreset::CpPhoton      => [1.00, 0.50, 0.85], // magenta
+        WebPreset::Trefoil       => [0.80, 0.60, 1.00], // violet
+        WebPreset::PhasedArray   => [1.00, 0.90, 0.45], // gold
     }
 }
 
@@ -1271,66 +1558,145 @@ fn world_box(half_x: f32, r: f32) -> (Vec<LineVertex>, Vec<u32>) {
 // egui control panel.
 // ---------------------------------------------------------------------------
 
-fn draw_web_ui(ctx: &egui::Context, s: &mut WebSettings, fps: f32) {
-    egui::Window::new("hopf-sta-viz · WebGL2 + CPU FDTD")
-        .default_pos([12.0, 46.0])
-        .resizable(false)
+/// Draw the whole egui surface and return the **scene rect** (in egui points)
+/// that the 3-D view should occupy — the strip above the phone control sheet,
+/// or the full screen on desktop.
+fn draw_web_ui(ctx: &egui::Context, s: &mut WebSettings, fps: f32) -> egui::Rect {
+    let screen = ctx.screen_rect();
+    let narrow = screen.width() < 560.0;
+
+    // ---- top overlay: [Fit view] + [Next demo], floating over the scene ----
+    egui::Area::new(egui::Id::new("top-overlay"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
         .show(ctx, |ui| {
-            ui.label(format!("{fps:.0} fps · real Yee-grid Maxwell FDTD on the CPU"));
-            ui.separator();
-
-            egui::ComboBox::from_label("Source shape")
-                .selected_text(s.preset.label())
-                .show_ui(ui, |ui| {
-                    for p in WebPreset::ALL {
-                        ui.selectable_value(&mut s.preset, *p, p.label());
-                    }
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgba_unmultiplied(8, 12, 20, 205))
+                .rounding(egui::Rounding::same(10.0))
+                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                .show(ui, |ui| {
+                    let h = if narrow { 40.0 } else { 30.0 };
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_sized([92.0, h], egui::Button::new(
+                                egui::RichText::new("Fit view").strong()))
+                            .clicked()
+                        {
+                            s.fit = true;
+                        }
+                        let next = egui::Button::new(
+                            egui::RichText::new("Next demo ▸").strong())
+                            .fill(egui::Color32::from_rgb(26, 92, 122));
+                        if ui.add_sized([124.0, h], next).clicked() {
+                            s.preset = s.preset.next();
+                            s.fire = true; // every demo starts with a launch
+                        }
+                    });
                 });
-
-            ui.horizontal(|ui| {
-                ui.label("Render:");
-                ui.selectable_value(&mut s.render_mode, WebRenderMode::Particles, "Tracers (S=E×B)");
-                ui.selectable_value(&mut s.render_mode, WebRenderMode::Lines, "B field lines");
-            });
-
-            ui.separator();
-            ui.checkbox(&mut s.mirror_on, "PEC mirror at +X end");
-            ui.add(egui::Slider::new(&mut s.mirror_deg, 0.0..=60.0).text("Mirror tilt °"));
-            ui.add(egui::Slider::new(&mut s.len_mult, 1.0..=5.0).text("Box length ×"));
-
-            ui.separator();
-            ui.add(egui::Slider::new(&mut s.sim_speed, 1u32..=4).text("Sim speed (substeps)"));
-            ui.add(egui::Slider::new(&mut s.source_power, 0.0..=1.5).text("Source power"));
-            ui.add(egui::Slider::new(&mut s.source_freq, 0.15..=1.2).text("Source frequency"));
-            ui.add(egui::Slider::new(&mut s.absorb, 0.002..=0.05).text("Absorption σ"));
-            ui.add(egui::Slider::new(&mut s.advect, 0.5..=10.0).text("Tracer drift"));
-            ui.add(egui::Slider::new(&mut s.brightness, 0.2..=3.0).text("Brightness"));
-            ui.add(
-                egui::Slider::new(&mut s.particle_count, 12_000u32..=120_000u32)
-                    .text("Tracers")
-                    .step_by(2000.0),
-            );
-
-            ui.horizontal(|ui| {
-                if ui.button("Inject pulse").clicked() {
-                    s.inject = true;
-                }
-                if ui.button("Clear field").clicked() {
-                    s.clear = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Reseed tracers").clicked() {
-                    s.reseed = true;
-                }
-                if ui.button("Fit view").clicked() {
-                    s.fit = true;
-                }
-            });
-
-            ui.separator();
-            ui.label("RMB orbit · MMB pan · wheel zoom");
         });
+
+    // ---- controls: bottom sheet on phones, floating window on desktop ----
+    if narrow {
+        egui::TopBottomPanel::bottom("controls")
+            .resizable(false)
+            .frame(
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(12, 14, 20))
+                    .inner_margin(egui::Margin::same(8.0)),
+            )
+            .show(ctx, |ui| {
+                let max_h = (screen.height() * 0.46).max(150.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_h)
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| controls_ui(ui, s, fps));
+            });
+        // The 3-D view fills everything above the control sheet.
+        ctx.available_rect()
+    } else {
+        egui::Window::new("hopf-sta-viz · WebGL2 + CPU FDTD")
+            .default_pos([12.0, 52.0])
+            .resizable(false)
+            .show(ctx, |ui| controls_ui(ui, s, fps));
+        // The floating window overlaps the scene; the 3-D view uses the whole surface.
+        screen
+    }
+}
+
+/// The shared control widgets, reused by the desktop window and the phone sheet.
+fn controls_ui(ui: &mut egui::Ui, s: &mut WebSettings, fps: f32) {
+    ui.label(format!("{fps:.0} fps · {} · CPU Yee-FDTD", s.preset.label()));
+    ui.separator();
+
+    egui::ComboBox::from_label("Source shape (STA null field)")
+        .selected_text(s.preset.label())
+        .show_ui(ui, |ui| {
+            for p in WebPreset::ALL {
+                ui.selectable_value(&mut s.preset, *p, p.label());
+            }
+        });
+
+    ui.horizontal(|ui| {
+        ui.label("Field:");
+        ui.selectable_value(&mut s.field, WebField::Poynting, "S = E×B");
+        ui.selectable_value(&mut s.field, WebField::E, "E");
+        ui.selectable_value(&mut s.field, WebField::B, "B");
+        ui.selectable_value(&mut s.field, WebField::Both, "E & B");
+    });
+
+    // The always-works [Fire] button: clears the grid and stamps a fresh,
+    // well-initialized STA pulse for the selected shape — so it always does
+    // something visible, however the sliders are set.
+    let fire = egui::Button::new(
+        egui::RichText::new("FIRE  —  launch pulse").strong().size(15.0),
+    )
+    .fill(egui::Color32::from_rgb(150, 32, 44));
+    if ui.add_sized([ui.available_width(), 32.0], fire).clicked() {
+        s.fire = true;
+    }
+    ui.checkbox(&mut s.drive_on, "Continuous source (steady beam)");
+
+    ui.separator();
+    ui.checkbox(&mut s.mirror_on, "PEC mirror at +X end");
+    ui.add(egui::Slider::new(&mut s.mirror_deg, 0.0..=60.0).text("Mirror tilt °"));
+    ui.add(egui::Slider::new(&mut s.len_mult, 1.0..=5.0).text("Box length ×"));
+    ui.add(
+        egui::Slider::new(&mut s.cross_n, 24u32..=72u32)
+            .text("Grid (cross cells) · CPU load ∝ n³"),
+    );
+
+    ui.separator();
+    ui.add(egui::Slider::new(&mut s.sim_speed, 1u32..=4).text("Sim speed (substeps)"));
+    ui.add(egui::Slider::new(&mut s.source_power, 0.0..=1.5).text("Source power"));
+    ui.add(egui::Slider::new(&mut s.source_freq, 0.15..=1.2).text("Source frequency"));
+    ui.add(egui::Slider::new(&mut s.absorb, 0.002..=0.05).text("Absorption σ"));
+    ui.add(egui::Slider::new(&mut s.advect, 0.5..=10.0).text("Tracer drift"));
+    ui.add(egui::Slider::new(&mut s.brightness, 0.2..=3.0).text("Brightness"));
+    ui.add(
+        egui::Slider::new(&mut s.particle_count, 12_000u32..=120_000u32)
+            .text("Tracers")
+            .step_by(2000.0),
+    );
+
+    ui.horizontal(|ui| {
+        if ui.button("Stamp pulse (add)").clicked() {
+            s.inject = true;
+        }
+        if ui.button("Clear field").clicked() {
+            s.clear = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.button("Reseed tracers").clicked() {
+            s.reseed = true;
+        }
+        if ui.button("Fit view").clicked() {
+            s.fit = true;
+        }
+    });
+
+    ui.separator();
+    ui.label("Touch: 1 finger orbit · 2 fingers pinch-zoom + pan");
+    ui.label("Mouse: RMB orbit · MMB pan · wheel zoom");
 }
 
 fn depth_state() -> wgpu::DepthStencilState {
